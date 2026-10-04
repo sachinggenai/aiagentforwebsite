@@ -311,7 +311,11 @@ def load_call_asset_ulaw(name: str) -> list[bytes] | None:
     from .voice_admission import asset_path
 
     path = asset_path(name)
-    if not path.is_file():
+    # ANITA ships no bundled audio, so `asset_path` returns None by design
+    # (voice_admission.asset_path). The guard has to test for None *before*
+    # calling is_file(): the source's helper always returned a Path, so the
+    # original `not path.is_file()` never had to consider absence.
+    if path is None or not path.is_file():
         return None
     try:
         import wave
@@ -1425,8 +1429,11 @@ class VoiceCallSession:
             # C3/N1: retrieval embeds the caller's actual utterance, not the
             # assembled instruction prompt (history + style rules dominated
             # the dense vector and diluted the question).
+            # `self.call_id` is the stream SID the WS handler set, so the turn
+            # is recorded against this call's conversation rather than a
+            # process-wide one.
             answer = await asyncio.to_thread(
-                run_rag_query_sync, prompt, "voice", question
+                run_rag_query_sync, prompt, "voice", question, self.call_id
             ) or ""
             if self._trace is not None:
                 self._trace.mark("llm_done")
@@ -1481,7 +1488,8 @@ class VoiceCallSession:
             try:
                 # C3/N1: same retrieval-query decoupling as the batch path.
                 async for item in query_rag_stream(
-                    prompt, cancel=cancel, retrieval_query=question
+                    prompt, cancel=cancel, retrieval_query=question,
+                    session_key=self.call_id,
                 ):
                     if isinstance(item, str):
                         if first_delta:
@@ -1489,8 +1497,12 @@ class VoiceCallSession:
                             self.log_event("LLM_FIRST_TOKEN")
                             if self._trace is not None:
                                 self._trace.mark("llm_first_token")
+                        # ANITA's ClauseCutter returns plain strings
+                        # (llm.py:81 `feed -> list[str]`). The source's
+                        # returned Clause objects, so this read `clause.text`
+                        # and every clause would have raised AttributeError.
                         for clause in cutter.feed(item):
-                            await _speak_clause(clause.text)
+                            await _speak_clause(clause)
                     else:
                         counters = item
             except GenerationCancelled:
@@ -1510,9 +1522,11 @@ class VoiceCallSession:
                 logger.warning("VoiceCall: streamed generation failed")
             if not cancelled:
                 # A complete trailing clause is spoken; a half-sentence never is.
+                # `flush()` returns str, empty when nothing was held — hence
+                # a truthiness test rather than `is not None`.
                 tail = cutter.flush()
-                if tail is not None:
-                    await _speak_clause(tail.text)
+                if tail:
+                    await _speak_clause(tail)
 
             # `parts` holds only what was actually SPOKEN, so on a cancel this is
             # the heard prefix -- which is what belongs in the conversation

@@ -491,3 +491,72 @@ class TestSiblingPorts:
         isolation = next(p for p in report.phases if p.name == "ISOLATION")
         assert not isolation.ok, f"booting on {port} ({owner}) was allowed"
         assert not report.ok
+
+
+class TestDotEnvIsLoaded:
+    """`.env` reaches the settings, with the real environment winning.
+
+    This was missing until 2026-10-04: `.env` was written, shipped as
+    `.env.example`, declared via `python-dotenv` and audited by
+    `config_truth.audit_config` — but never loaded, so every secret in it was
+    inert and every boot reported the Twilio credentials unset while they sat
+    in the file. A call to the provisioned number would have been refused at
+    the signature check.
+
+    Every test here passes an explicit `project_root`, so none of them read the
+    developer's real `.env` — a test that did would pass or fail according to
+    whose machine it ran on.
+    """
+
+    CONFIG = PLATFORM / "config" / "anita.yaml"
+
+    def _settings(self, root):
+        """Load with no explicit mapping, so `.env` is consulted."""
+        return cfg.load_settings(None, config_path=self.CONFIG, project_root=root)
+
+    @pytest.fixture(autouse=True)
+    def _clear_the_key(self, monkeypatch):
+        """Start each test with ANITA_DB_NAME absent from the process
+        environment, so whatever it ends up as came from `.env` or from a
+        `setenv` the test itself made."""
+        monkeypatch.delenv("ANITA_DB_NAME", raising=False)
+
+    def test_values_in_dot_env_reach_the_settings(self, tmp_path):
+        (tmp_path / ".env").write_text("ANITA_DB_NAME=from_dot_env\n", encoding="utf-8")
+        settings = self._settings(tmp_path)
+        assert settings.env.get("ANITA_DB_NAME") == "from_dot_env"
+
+    def test_the_real_environment_wins_over_dot_env(self, tmp_path, monkeypatch):
+        """An override must override. Silently discarding one means running
+        with a credential nobody realises is the wrong one."""
+        (tmp_path / ".env").write_text("ANITA_DB_NAME=from_dot_env\n", encoding="utf-8")
+        monkeypatch.setenv("ANITA_DB_NAME", "from_the_environment")
+        settings = self._settings(tmp_path)
+        assert settings.env.get("ANITA_DB_NAME") == "from_the_environment"
+
+    def test_an_explicit_mapping_is_not_contaminated_by_dot_env(self, tmp_path):
+        """Tests pass their own environment for isolation; the file must not
+        leak into it, or a suite would inherit the developer's secrets."""
+        (tmp_path / ".env").write_text("ANITA_DB_NAME=from_dot_env\n", encoding="utf-8")
+        settings = cfg.load_settings(
+            {"ANITA_DB_NAME": "explicit"}, config_path=self.CONFIG, project_root=tmp_path
+        )
+        assert settings.env.get("ANITA_DB_NAME") == "explicit"
+
+    def test_a_missing_dot_env_is_not_an_error(self, tmp_path, monkeypatch):
+        settings = self._settings(tmp_path)
+        assert settings.env.get("ANITA_DB_NAME") in (None, "", "anita_ams")
+
+    def test_a_malformed_dot_env_does_not_stop_the_boot(self, tmp_path, monkeypatch):
+        """The file is an operator convenience; a broken one must not take the
+        platform down when the real environment can still supply everything."""
+        (tmp_path / ".env").write_text("this is not a key value pair\n", encoding="utf-8")
+        settings = self._settings(tmp_path)
+        assert settings is not None
+
+    def test_dot_env_is_read_from_the_project_root_not_the_cwd(self, tmp_path, monkeypatch):
+        """The platform is started from several directories; a config that
+        depended on the cwd would work in one and silently not in another."""
+        (tmp_path / ".env").write_text("ANITA_DB_NAME=from_root\n", encoding="utf-8")
+        settings = self._settings(tmp_path)
+        assert settings.env.get("ANITA_DB_NAME") == "from_root"

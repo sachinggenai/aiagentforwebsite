@@ -136,6 +136,13 @@ class AdmissionController:
         self._level = DegradationLevel.FULL
         self._reason = ""
         self.limits: list[dict] = []
+        # US-016 AC-2: `served`, `degraded`, `failed` and `refused` are four
+        # different things and are never collapsed. `refused` is counted here
+        # because admission is the only place that decides it; the other three
+        # arrive from the call engine as the turn resolves.
+        self._outcomes: dict[str, int] = {
+            "served": 0, "degraded": 0, "failed": 0, "refused": 0,
+        }
 
     # -- budget ------------------------------------------------------------
     def footprint_mib(self, level: DegradationLevel | None = None) -> int:
@@ -216,6 +223,7 @@ class AdmissionController:
         degraded system says so, and only a genuinely full one says "busy".
         """
         if not self.voice_available:
+            self._outcomes["refused"] += 1
             return AdmissionDecision(
                 False,
                 reason=f"voice shed at level {self._level.value}",
@@ -225,6 +233,7 @@ class AdmissionController:
         if call_id in self._active:
             return AdmissionDecision(True, reason="already admitted", level=self._level)
         if self.active_calls() >= self.max_concurrent_calls:
+            self._outcomes["refused"] += 1
             return AdmissionDecision(
                 False,
                 reason=f"at capacity ({self.max_concurrent_calls} concurrent calls)",
@@ -249,6 +258,28 @@ class AdmissionController:
             self._active.pop(call_id, None)
         return len(stale)
 
+    # -- turn outcomes (US-016 AC-2) ---------------------------------------
+    def note_served(self) -> None:
+        """A turn produced speech — the caller heard a real answer."""
+        self._outcomes["served"] += 1
+
+    def note_failed(self) -> None:
+        """A turn produced no speech at all."""
+        self._outcomes["failed"] += 1
+
+    def note_asset_played(self) -> None:
+        """A pre-synthesised fixed response was played.
+
+        This is the `degraded` outcome: the caller heard something, but it was
+        a canned asset rather than an answer composed for their question.
+        """
+        self._outcomes["degraded"] += 1
+
+    @property
+    def outcomes(self) -> dict[str, int]:
+        """A copy — callers read the axis, they do not mutate it."""
+        return dict(self._outcomes)
+
     def snapshot(self) -> dict:
         return {
             "level": self._level.value,
@@ -260,6 +291,9 @@ class AdmissionController:
             "budget_safe": self.budget_is_safe()[0],
             "voice_available": self.voice_available,
             "text_available": self.text_available,
+            # The four outcomes are reported as a group so an operator cannot
+            # see one and mistake it for the whole picture.
+            "outcomes": self.outcomes,
         }
 
 

@@ -331,6 +331,48 @@ def _read_yaml(path: Path) -> Mapping[str, Any]:
     return data
 
 
+def _environment(env: Mapping[str, str] | None, root: Path) -> dict[str, str]:
+    """The effective environment: `.env`, overlaid by the real environment.
+
+    ``.env`` is read only when no mapping was passed in, so a test or a caller
+    that supplies its own environment for isolation is never contaminated by
+    the developer's file.
+
+    **Real environment variables win.** That is the standard dotenv precedence
+    and the one that matters operationally: `TWILIO_AUTH_TOKEN=... python -m
+    anita` must override a stale value in the file rather than be silently
+    ignored by it — the failure mode of an override being quietly discarded is
+    a credential nobody realises is the wrong one.
+
+    This was missing entirely until 2026-10-04. `.env` was written, shipped as
+    `.env.example`, declared in `requirements.txt` via `python-dotenv`, and
+    even *inspected* by `config_truth.audit_config` — but nothing loaded it into
+    the settings, so every secret in it was inert and every boot reported the
+    Twilio credentials unset while they sat in the file.
+    """
+    if env is not None:
+        return dict(env)
+
+    merged: dict[str, str] = {}
+    env_file = root / ".env"
+    if env_file.is_file():
+        try:
+            from dotenv import dotenv_values
+
+            merged.update(
+                {k: v for k, v in dotenv_values(env_file).items() if v is not None}
+            )
+        except Exception:  # noqa: BLE001
+            # A malformed .env must not stop the platform booting: the file is
+            # an operator convenience, and the audit reports what it contains.
+            # Settings then come from the real environment alone, and anything
+            # missing is named by the boot report rather than guessed.
+            pass
+
+    merged.update(os.environ)
+    return merged
+
+
 def load_settings(
     env: Mapping[str, str] | None = None,
     config_path: Path | str | None = None,
@@ -338,12 +380,15 @@ def load_settings(
 ) -> AnitaSettings:
     """Build frozen settings from the config file plus the environment.
 
-    The environment wins over the file for operator overrides; secrets exist
-    only in the environment. Raises :class:`ConfigError` naming the key on any
-    malformed value — never falls back silently.
+    The environment wins over the config file for operator overrides; secrets
+    exist only in the environment — which, when no mapping is passed, means
+    ``.env`` overlaid by the real environment (see :func:`_environment`).
+
+    Raises :class:`ConfigError` naming the key on any malformed value — never
+    falls back silently.
     """
-    environment = dict(os.environ if env is None else env)
     root = Path(project_root) if project_root else Path(__file__).resolve().parents[2]
+    environment = _environment(env, root)
     path = Path(config_path) if config_path else root / "config" / "anita.yaml"
 
     data = _read_yaml(path)

@@ -139,10 +139,29 @@ class TestAdapters:
         assert asset_path("anything") is None
 
     def test_platform_adapter_reports_a_whisper_device_config(self):
+        """Must unpack exactly as the engine unpacks it.
+
+        This test previously asserted a 3-key dict — the adapter's own shape,
+        not the shape the call site consumes. Both sides of the seam were
+        tested; the join between them was not, so the ValueError at
+        `voice.py:72` was invisible and the broad except that follows turned
+        it into a silent fallback to CUDA.
+        """
         from anita.voice_platform import get_whisper_device_config
 
-        config = get_whisper_device_config()
-        assert set(config) >= {"device", "compute_type", "cpu_threads"}
+        device, compute_type = get_whisper_device_config()  # must not raise
+        assert isinstance(device, str) and device
+        assert isinstance(compute_type, str) and compute_type
+
+    def test_load_call_asset_tolerates_a_missing_asset(self):
+        """ANITA ships no bundled audio, so asset_path returns None.
+
+        `load_call_asset_ulaw` called `None.is_file()` and crashed. The guard
+        must test for absence before touching the path.
+        """
+        from anita.voice import load_call_asset_ulaw
+
+        assert load_call_asset_ulaw("busy_message") is None
 
     def test_llm_adapter_reports_streaming_on(self):
         from anita import voice_llm
@@ -150,26 +169,57 @@ class TestAdapters:
         assert voice_llm.LLM_STREAM is True
         assert issubclass(voice_llm.GenerationFailed, Exception)
 
-    def test_rag_adapter_produces_no_text_when_the_gate_declines(self):
-        """BRD-04 holds inside the voice path too: no context, no answer."""
-        import asyncio
+    def test_the_engine_declines_when_the_gate_declines(self):
+        """BRD-04: no context, no answer.
 
+        This used to assert against a voice-only retrieval adapter. It is now
+        a property of the shared engine, which is the stronger statement: the
+        voice path holds it *because* voice runs the same tree as chat, not
+        because a second adapter was written carefully.
+        """
+        from anita.answer_engine import AnswerEngine
+        from anita.orchestrator import Intent
         from anita.retrieval import Chunk, GroundingGate, InMemoryStore, Retriever
-        from anita.voice_rag import make_query_rag_stream
 
         chunks = [Chunk(chunk_id="c1", text="X-Ray Cassette specification",
                         source_url="https://www.anitamedicalsystems.com/p-1.html")]
         gate = GroundingGate(threshold=0.99)   # nothing passes on similarity
         retriever = Retriever(chunks, _NullEmbedder(), InMemoryStore(), gate)
-        stream = make_query_rag_stream(retriever)
+        engine = AnswerEngine(retriever=retriever)
 
-        async def collect():
-            return [piece async for piece in stream("what is the weather in Mumbai?")]
+        class _Conversation:
+            conversation_id = "conv-1"
+            turns: list = []
 
-        pieces = asyncio.run(collect())
-        joined = " ".join(pieces).lower()
-        assert "don't have that" in joined
-        assert "specification" not in joined, "declined retrieval must not leak context"
+        reply = engine.answer(
+            Intent.CATALOGUE, "what is the weather in Mumbai?", _Conversation()
+        )
+        assert reply.declined
+        assert "specification" not in reply.text, (
+            "declined retrieval must not leak context"
+        )
+
+    def test_the_stream_yields_clauses_of_the_installed_answer(self):
+        """The streaming path cuts the composed answer, it does not compose one.
+
+        Regression guard for the ImportError that made every streamed turn
+        return ("", []): the module defined only a factory while the engine
+        imported a name that did not exist.
+        """
+        import asyncio
+
+        from anita import voice_pipeline, voice_rag
+
+        original = voice_pipeline._ANSWER
+        try:
+            voice_pipeline._ANSWER = lambda q, *, session_key: "First clause. Second clause."
+            pieces = asyncio.run(_collect_stream(voice_rag.query_rag_stream("q", retrieval_query="q")))
+        finally:
+            voice_pipeline._ANSWER = original
+
+        joined = " ".join(pieces)
+        assert "First clause." in joined
+        assert "Second clause." in joined
 
     def test_every_adapter_module_is_importable(self):
         import importlib
@@ -177,6 +227,66 @@ class TestAdapters:
         for name in ("voice_admission", "voice_platform", "voice_llm",
                      "voice_rag", "voice_trace", "voice_pipeline"):
             importlib.import_module(f"anita.{name}")
+
+
+class TestAdmissionSeam:
+    """Tests that join the engine to the assembled platform.
+
+    The defects these cover survived a green suite because every test asserted
+    one side of a seam. `REGISTRY` was asserted to be an AdmissionController,
+    and the engine was asserted to import — but nothing checked that the
+    controller the engine calls is the controller the platform built.
+    """
+
+    def test_the_engine_registry_is_the_assembled_controller(self):
+        """assembly must install its controller into the engine's seam.
+
+        With two controllers, voice capacity was counted twice: the box would
+        admit calls the surfaces had refused, and the ceiling would not hold.
+        """
+        from anita import assembly, voice_admission
+
+        built = assembly.assemble(require_preflight=False)
+        # `built.admin.admission` is the controller the surfaces admit
+        # against — the same object the engine must see.
+        assert voice_admission.REGISTRY is built.admin.admission, (
+            "the engine's REGISTRY is not the assembled controller — voice "
+            "capacity is being counted against a controller nothing else knows"
+        )
+
+    def test_the_four_outcomes_are_counted_separately(self):
+        """US-016 AC-2: served, degraded, failed and refused never collapse."""
+        from anita.speech import AdmissionController
+
+        controller = AdmissionController(max_concurrent_calls=1)
+        assert controller.outcomes == {
+            "served": 0, "degraded": 0, "failed": 0, "refused": 0,
+        }
+
+        controller.note_served()
+        controller.note_failed()
+        controller.note_asset_played()
+
+        # A refusal is counted at admission, which is the only place that
+        # decides it: fill the single slot, then ask for a second call.
+        controller.admit("call-1")
+        assert controller.admit("call-2").admitted is False
+
+        assert controller.outcomes == {
+            "served": 1, "degraded": 1, "failed": 1, "refused": 1,
+        }
+        assert controller.snapshot()["outcomes"] == controller.outcomes
+
+    def test_outcomes_are_reported_as_a_group(self):
+        """An operator must not see one outcome and read it as the picture."""
+        from anita.speech import AdmissionController
+
+        snapshot = AdmissionController().snapshot()
+        assert set(snapshot["outcomes"]) == {"served", "degraded", "failed", "refused"}
+
+
+async def _collect_stream(agen) -> list[str]:
+    return [piece async for piece in agen]
 
 
 class _NullEmbedder:

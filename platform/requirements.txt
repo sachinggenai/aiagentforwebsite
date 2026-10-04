@@ -29,5 +29,16 @@ faster-whisper>=1.1,<2.0
 kokoro-onnx>=0.4,<1.0
 onnxruntime>=1.18
 
+# `audioop` was removed from the stdlib in Python 3.13. The migrated engine
+# converts every frame through it (voice.py:238,243), so on 3.13+ the audio
+# path raises ImportError on the first frame. `audioop-lts` restores the same
+# module name; it is a no-op on 3.12 and below, where the stdlib still has it.
+audioop-lts>=0.2; python_version >= "3.13"
+
+# scipy is imported unguarded by the TTS chunking path (voice.py:345,999,1702,
+# 1873) but was never declared here — it arrived transitively and only worked
+# where something else had already pulled it in.
+scipy>=1.11
+
 # --- Dev / test ---
 pytest>=8.0,<9.0

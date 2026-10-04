@@ -35,13 +35,18 @@ is at 100 %, and it explicitly states it "measures *plan* completeness, not prod
 | Status | Count | Items |
 |---|---|---|
 | `COMPLETED` | **32** | 22 of US-001…US-030 · 10 of US-101…US-115 · Stages 0–11 |
-| `IN PROGRESS` | **7** | US-002, US-003, US-008, US-016, US-017, US-018, US-021 |
-| `BLOCKED` | **2** | US-001 (needs a Twilio number) · CR-02 (needs decisions Q9–Q12) |
+| `IN PROGRESS` | **8** | US-001 (see §3a), US-002, US-003, US-008, US-016, US-017, US-018, US-021 |
+| `BLOCKED` | **1** | CR-02 (needs decisions Q9–Q12) |
 | `YET TO START` | **5** | DG-06 operational config · DG-08 legal review · U-1 · U-2 · U-3 (all in §6) |
 | `NOT FEASIBLE` | **0** | Nothing in the plan is infeasible — the feasibility verdict is **Feasible** |
 
-Stories: 22 + 7 + 1 = 30. `NOT FEASIBLE` is genuinely zero: `FEASIBILITY-STUDY.md` §1 returns
+Stories: 22 + 8 = 30. `NOT FEASIBLE` is genuinely zero: `FEASIBILITY-STUDY.md` §1 returns
 "Feasible. Recommended, with two blocking conditions before public launch."
+
+**US-001 moved from `BLOCKED` to `IN PROGRESS` on 2026-10-04.** The previous entry said it was
+blocked on provisioning a Twilio number. That was incomplete: the number was necessary but nothing
+like sufficient — `voice.py` had never executed a single turn. See §3a for what was actually wrong
+and what has since been fixed.
 
 ---
 
@@ -75,7 +80,7 @@ not a claim that the product is launch-ready; §6 of this file covers what is ac
 
 | Story | Status | Comment |
 |---|---|---|
-| US-001 PSTN voice end to end over Twilio Media Streams | `BLOCKED` | **No voice route is served at all.** The engine has never carried a call — no carrier, no media stream, no barge-in under load. Deferred until a Twilio number is provisioned, because local STT/TTS round trips do not validate the path |
+| US-001 PSTN voice end to end over Twilio Media Streams | `IN PROGRESS` | **Build started 2026-10-04 — see §3a.** Number provisioned (`+12792365960`, E.164). The answer path now works end to end and is proven. Still missing: the three routes (`POST /twilio/voice`, `POST /twilio/status`, `WS /twilio/media-stream`), the TwiML builders, and the media-frame relay — note `voice.py`'s docstring references `handle_media`, which **does not exist anywhere** |
 | US-002 Web chat, WhatsApp and a configurable extra channel | `IN PROGRESS` | Web chat works. The WhatsApp adapter **is registered** in the channel gateway, but no webhook route is served, so an inbound message has nowhere to land. Deferred until the text + lead product is validated with real buyers over web chat |
 | US-003 Browser-mic behind a hardened public edge | `IN PROGRESS` | **Hardening is built** — `validate_twilio_signature()` and `RateLimiter` in `channels.py`. The admission-ticket route **is** served (`Route.VOICE_TICKET`), but there is no audio path behind it: a ticket is issued and nothing consumes the audio |
 
@@ -150,6 +155,149 @@ not a claim that the product is launch-ready; §6 of this file covers what is ac
 | US-007 Responsive web chat surface | `COMPLETED` | 50/50 browser scenarios pass, desktop **and** mobile |
 | US-008 Browser voice client, typing one tap away | `IN PROGRESS` | Same media gap as US-003 — the ticket route is served, the audio path is not |
 | US-009 Admin console behind a login | `COMPLETED` | Bearer-token admin surfaces (UC-12, UC-13, UC-15) |
+
+---
+
+## 3a. US-001 build log — started 2026-10-04
+
+### The blocker was not what the previous entry said
+
+The earlier `BLOCKED` entry read "deferred until a Twilio number is provisioned". The number mattered,
+but it was not the blocker. `voice.py` is a near-verbatim copy of the source's `voice_handler.py`
+(1,890 lines; a CR-stripped diff shows 24 differing lines, all of them import retargets) and it
+**had never executed a single turn**. It was not wired to any route, was never constructed by any
+test, and carried defects that would have failed on the first call.
+
+### Environment
+
+| # | Problem | Resolution |
+|---|---|---|
+| B1 | `audioop` was removed from the stdlib in Python 3.13; the venv is **3.14.7**. Every µ-law↔PCM frame conversion calls it | Installed `audioop-lts`, added to `requirements.txt`. **Verified**: 320 B PCM16 → 160 B µ-law → 320 B, RMS 14772 |
+| B2 | `scipy` imported unguarded by the TTS chunking path but never declared — it only worked transitively | Installed and declared. **Verified**: `scipy.signal.resample` works, 440 Hz tone survives |
+| B3 | **`import av` is blocked by Smart App Control** (`VerifiedAndReputablePolicyState = 1`) — 3 of PyAV's 67 extension modules. The FFmpeg DLLs are unaffected | Decision taken: disable Smart App Control. **Outstanding** — needs the Windows Security UI and a reboot |
+
+**Note on B2:** the `scipy` block was *transient*. Smart App Control blocks freshly-written binaries
+until they acquire reputation, so `scipy` failed minutes after `pip install` and passed later
+unchallenged. Only PyAV is persistently blocked (installed August, still refused). Worth knowing
+before diagnosing a future post-install import failure as a real problem.
+
+### Wiring defects in `voice.py` (Phase C)
+
+| # | Defect | Status |
+|---|---|---|
+| C1 | `voice_pipeline.run_rag_query_sync` imported as a name the module never defined — it exposed only a factory. The `ImportError` was swallowed, so **every batch turn returned `""`** | ✅ Fixed |
+| C2 | Same for `voice_rag.query_rag_stream` — every **streamed** turn returned `("", [])` | ✅ Fixed |
+| C3 | `get_whisper_device_config()` returned a 3-key dict where the call site unpacks 2 values. The `ValueError` was swallowed by a broad `except`, falling back to `device = "cuda" if CUDA_VISIBLE_DEVICES else "cpu"` — and that variable defaults to `"0"`, so the fallback was **always CUDA** | ✅ Fixed |
+| C4 | `REGISTRY.note_served/note_failed/note_asset_played` did not exist on `AdmissionController` → `AttributeError` on the first completed turn | ✅ Fixed — the four-outcome axis (US-016 AC-2) now lives on the controller |
+| C5 | `asset_path()` returns `None` by design, then `None.is_file()` was called outside the try block | ✅ Fixed |
+| C6 | `ClauseCutter` API mismatch — the engine read `.text`, ANITA's returns plain `str` | ✅ Fixed |
+| C7 | Two separate `AdmissionController` instances (`voice_admission` vs `assembly`), so voice capacity was counted twice and the ceiling would not hold | ✅ Fixed — assembly installs its controller into the engine's seam |
+| C8 | `ChannelGateway.public_base_url` is never set by `assembly.py`, so signature validation would compare against `""` | ⬜ Open |
+
+### The answer path — C1/C2 in depth
+
+The adapters were not merely mis-imported. They did retrieval only and returned **raw chunk text**,
+while the live chat path (`ChatSurface._answer`) is deterministic-first and never calls the LLM —
+`OllamaBackend.generate()` has no callers anywhere in the app.
+
+Wiring voice to the LLM would have made it the **only** LLM prose consumer: answering differently
+from chat, uncovered by the frozen evaluation set, and putting generated price text one prompt slip
+from violating `BRD-05`.
+
+**Decision (user, 2026-10-04): deterministic-first, with LLM prose only for open questions.**
+Implemented by **extracting the answer tree out of `ChatSurface`** into `anita/answer_engine.py`
+(`AnswerEngine`), which chat and voice now share:
+
+* `answer_engine.py` — the decision tree plus the reply shape and the canned texts
+* `surfaces.py` — `ChatSurface` delegates; the moved names are re-exported so no importer changes
+* `voice_pipeline.py` / `voice_rag.py` — both answer through the installed engine
+* `assembly.py` — installs the engine into the voice seam at boot
+
+`ChatSurface.answers` / `.retriever` / `.leads` became properties that read through to the engine,
+so there is exactly one copy of each and no way for the surface and the engine to disagree about
+which corpus is in play.
+
+**Proven working** — a caller's turn now produces:
+
+| Spoken question | Answer |
+|---|---|
+| "what does the ultrasound gel do" | *"Ultrasound Gel: What makes this Ultrasound Gel suitable for…"* — grounded, names the product |
+| "how much is the ultrasound gel" | *"Ultrasound Gel is listed at ₹60/Piece. This is the published list price, excluding taxes; a formal quotation is required for an order."* — price **with** the caveat, no generated text |
+| "hello" | greeting |
+| "what can you do" | help text |
+| "who won the world cup" | decline **with** the callback offer |
+
+The streamed path cuts the same answer at speakable boundaries, so clause-level TTS still starts
+early: `['Ultrasound Gel is listed at ₹60/Piece.', 'This is the published list price, excluding taxes;', 'a formal quotation is required for an order.']`
+
+### The media path (`voice_webhook.py`, 2026-10-04)
+
+New module, 17 tests. Implements the ingress order the contract fixes — **signature, then
+admission, then TwiML** — and nothing about it needs a carrier to verify:
+
+| Acceptance criterion | How it is proven |
+|---|---|
+| AC-5 / TAC-4 — invalid signature → 403, empty body, no side effect | Valid, missing, and **tampered-body** signatures all covered; a refused call takes no admission slot |
+| AC-4 / TAC-5 — capacity full → busy TwiML, **no stream** | Asserted as `<Stream` absent from the body, and `active_calls()` unchanged |
+| TAC-1 — validate before anything else | The body is never parsed before the signature check |
+| T-16 — signature is checked against the **public** URL, not the request host | Signed for `https://anita.example.com`, delivered "through the tunnel", still validates |
+| US-016 AC-2 — refusals land on the four-outcome axis | `admission.outcomes["refused"]` asserted |
+| TwiML well-formedness | Both shapes parsed with `ElementTree`; a quote in the URL cannot break out of the attribute |
+
+**C8 is fixed**: `assembly.py` now reads `TUNNEL_HOST`, builds the public base URL, passes it to
+`default_gateway(public_base_url=...)`, and constructs a `VoiceWebhook` — which is exposed as
+`Assembly.voice`. An unset `TUNNEL_HOST` is reported as a degradation rather than left implicit.
+
+### The routes are live (2026-10-04)
+
+`POST /twilio/voice` and `POST /twilio/status` are registered in `server.py` and proven over HTTP
+with `TestClient` — the thing that catches a handler which is built and wired but never served,
+which is exactly the state this was in before. The webhook rides on `Router` (not on `Route`: those
+are JSON endpoints, and a Twilio webhook takes a form body and answers in TwiML), so the whole
+surface still has one seam and `serve.py` needed no change.
+
+The raw **form fields** are what get validated, because that is what Twilio signs — a handler that
+validated a parsed subset would accept bodies Twilio never signed. With no `TUNNEL_HOST` configured
+the paths return **404 rather than existing and always refusing**.
+
+Fixed on the way: `app_from_environment()` passed the whole `Assembly` where `create_app` expects a
+`Router`, so every request would have raised `AttributeError` on `Assembly.dispatch`. It was dead
+code — the live path uses `serve(built.router)` — but it was wrong.
+
+### `.env` was never read — fixed
+
+**`.env` was written, shipped as `.env.example`, declared via `python-dotenv`, and even *inspected*
+by `config_truth.audit_config` — but nothing ever loaded it.** `load_dotenv` was not called anywhere
+in the repo; `load_settings()` read `os.environ` or an explicit mapping, and nothing bridged them.
+
+The consequence was that every secret in the file was inert: the Twilio credentials, the provisioned
+number, and `ANITA_ADMIN_TOKEN`. It is why every boot reported `TWILIO_AUTH_TOKEN unset` while a
+valid 32-character token sat in the file — and it would have refused every inbound call at the
+signature check, because `validate_twilio_signature` raises when there is no token.
+
+Now wired in `config.py::_environment`, with three properties, each tested:
+
+* `.env` is read **only when no mapping was passed**, so a test or caller supplying its own
+  environment is never contaminated by the developer's file
+* **Real environment variables win** — the standard dotenv precedence, and the one that matters:
+  an override being silently discarded means running with a credential nobody realises is wrong
+* A missing or malformed `.env` does not stop the boot; the file is a convenience, and anything
+  missing is named by the boot report rather than guessed
+
+**Verified:** a full preflight now reports **one** degradation — `TUNNEL_HOST unset` — down from two.
+`TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER` (`+12792365960`) and `ANITA_ADMIN_TOKEN` all load.
+
+### Still to build for US-001
+
+1. **`WS /twilio/media-stream` and the frame relay** — the largest remaining piece. The engine's
+   docstring names `handle_media`, which **does not exist**; the source's media loop lived in
+   `app/main.py`, which REC-10 dropped by design. No WebSocket route exists anywhere in the app.
+2. **Schema** — `channel_endpoint`, `inbound_event`, `channel_session`.
+3. **Public ingress** — a Cloudflare tunnel, which is also what clears the remaining `TUNNEL_HOST`
+   degradation. Quick tunnels change hostname on every restart, so Twilio's webhook must be
+   re-pointed each time; the source had a `scripts/update_twilio_webhook.py` for this, which is
+   **not** in this repo.
+4. **Verification** — `T-01…T-17`, then a real call to `+12792365960`.
 
 ---
 
@@ -230,10 +378,16 @@ Each carries a written reason in `config/anita.yaml` → `release.deferred_use_c
 
 | Check | Command | Result |
 |---|---|---|
-| Unit suite | `.venv/Scripts/python -m pytest tests -q` | **742 passed**, 1 skipped, 0 failed |
-| Browser suite | `bash tests/e2e/run.sh` | **50 passed** (25 scenarios × desktop + mobile) in 1.8 m |
-| System integrity | `scripts/system_check.py` | **16 passed · 0 failed · 5 deferred** — 37 modules loaded, 11 dependencies wired |
+| Unit suite | `.venv/Scripts/python -m pytest tests -q` | **747 passed**, 1 skipped, 0 failed |
+| Browser suite | `bash tests/e2e/run.sh` | **50 passed** (25 scenarios × desktop + mobile) in 1.7 m |
+| System integrity | `scripts/system_check.py` | **16 passed · 0 failed · 5 deferred** — 38 modules loaded, 11 dependencies wired |
+| Evaluation set | `scripts/release_gate.py --no-browser` | **70 / 70 cases passed** |
+| Voice answer path | see §3a | grounded answer, price **with** caveat, greeting, help, decline — all correct |
 | Release gate | `scripts/release_gate.py` | **FAIL — false alarm.** See below |
+
+The extraction in §3a was verified against all four of the first gates — the unit suite, the frozen
+evaluation set, the browser suite and the system check — because it moves live code the evaluation
+set depends on. All four stayed green.
 
 ### The release gate failure is an artifact, not a regression
 
@@ -265,15 +419,22 @@ the former as the latter — precisely the confusion its own docstring says it e
 
 In priority order:
 
-1. **Fix the release gate** (§8.3) — small, contained, and it currently produces a false `FAIL` on a
+1. **Finish US-001** (§3a) — the remaining six items: C8, the three routes, the TwiML builders, the
+   media-frame relay, the schema, and the tunnel. The answer path is done; this is the transport.
+2. **Fix the release gate** (§8.3) — small, contained, and it currently produces a false `FAIL` on a
    suite that is genuinely green. A port preflight that reports *"no instance on :8085 — start
    `run.sh` first"* removes the ambiguity.
-2. **Commit CR-01.** All ten stories' work — `shared/`, both adapters, three new test files — is
-   **uncommitted** on branch `chore/secret-hygiene-and-config-audit`, a branch whose name describes
-   unrelated work. It should be committed and moved to a branch that names CR-01.
 3. **Answer CR-02 Q9–Q12** (§5) to unblock the production-infrastructure change request.
-4. **DG-06 operational config** — set `TWILIO_AUTH_TOKEN` and confirm signature verification live.
-5. **DG-08 legal review** — needs an owner; blocks public launch and UC-09.
+4. **Disable Smart App Control** (B3, §3a) — needs the Windows Security UI and a reboot, then a
+   re-probe that `import av` succeeds.
+5. **DG-06 operational config** — `TWILIO_AUTH_TOKEN` *is* set in `.env`; the remaining work is
+   confirming signature verification live once the webhook route exists (item 1).
+6. **DG-08 legal review** — needs an owner; blocks public launch and UC-09.
 
-Items 1–3 are engineering and can start immediately. Items 4–5 need decisions or people outside the
-build.
+Items 1–3 are engineering and can start immediately. Items 4–6 need either a local machine change or
+people outside the build.
+
+**Committed 2026-10-04:** CR-01 (all ten stories, `shared/rag`, `shared/sentiment`, both adapters,
+three test files, and the CR-01/CR-02 planning documents) as `5b46528` on
+`chore/secret-hygiene-and-config-audit`. That branch name still describes unrelated work; if this
+becomes a PR it should be renamed. The Phase C work above is **not yet committed**.

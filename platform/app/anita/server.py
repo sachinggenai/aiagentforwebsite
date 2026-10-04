@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import FastAPI, Request
+from fastapi import Response as RawResponse
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -126,6 +127,43 @@ def create_app(router: Router, *, title: str = "ANITA MEDICAL SYSTEMS") -> FastA
             include_in_schema=False,
         )
 
+    # -- Twilio ingress (US-001) -------------------------------------------
+    # Registered here rather than through the route table: `Route` values are
+    # JSON endpoints dispatched through `Router.dispatch`, and a Twilio webhook
+    # is neither. It takes a form-encoded body, must be allowed to answer 403
+    # with an empty body, and replies in TwiML.
+    if router.voice is not None:
+        webhook = router.voice
+
+        async def _handle_twilio(request: Request, kind: str) -> Any:
+            """Read the form and the signature, then let the webhook decide.
+
+            The **raw form fields** are what gets validated, because that is
+            what Twilio signs — sorted key/value pairs, not a parsed subset. A
+            handler that validated `request.json()` or a hand-picked field
+            would accept bodies Twilio never signed.
+            """
+            try:
+                form = await request.form()
+            except Exception:  # noqa: BLE001 - an unparseable body is not a valid webhook
+                form = {}
+            params = {str(key): str(value) for key, value in form.items()}
+            signature = request.headers.get("x-twilio-signature")
+
+            handler = webhook.voice if kind == "voice" else webhook.status
+            status, body, content_type = handler(params=params, signature=signature)
+            return RawResponse(
+                content=body, status_code=status, media_type=content_type
+            )
+
+        @app.post("/twilio/voice", include_in_schema=False)
+        async def twilio_voice(request: Request) -> Any:
+            return await _handle_twilio(request, "voice")
+
+        @app.post("/twilio/status", include_in_schema=False)
+        async def twilio_status(request: Request) -> Any:
+            return await _handle_twilio(request, "status")
+
     @app.get("/", include_in_schema=False)
     async def chat_page() -> Any:
         return _page("chat.html")
@@ -191,11 +229,21 @@ def serve(router: Router, *, host: str = "127.0.0.1", port: int = 8100) -> None:
     uvicorn.run(create_app(router), host=host, port=port, log_level="info")
 
 
-def app_from_environment() -> FastAPI:  # pragma: no cover - exercised by serve.py
-    """Assemble from ``ANITA_`` settings. Used by ``scripts/serve.py``."""
+def app_from_environment() -> FastAPI:
+    """Assemble from ``ANITA_`` settings, then build the app around the router.
+
+    This previously passed the whole ``Assembly`` where ``create_app`` expects a
+    ``Router``, so the first request would have raised ``AttributeError`` on
+    ``Assembly.dispatch``. It was never reached: the live entry point
+    (``scripts/serve.py``) builds the app from ``built.router`` directly.
+    """
     from .assembly import assemble
 
-    return create_app(assemble())
+    built = assemble()
+    app = create_app(built.router)
+    # Kept for scripts that want the rest of the assembly from the app handle.
+    app.state.assembly = built
+    return app
 
 
 __all__ = ["create_app", "serve", "app_from_environment", "METHOD_AND_PATH",

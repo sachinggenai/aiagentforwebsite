@@ -56,6 +56,10 @@ class Assembly:
     notes: list[str] = field(default_factory=list)
     # Set by `assemble`; None when sentiment observation is unavailable.
     sentiment: Any = None
+    # The Twilio ingress decision (US-001). Set by `assemble`; None when the
+    # instance has no public address, in which case no call can legitimately
+    # arrive and there is nothing to decide.
+    voice: Any = None
 
     @property
     def degraded(self) -> bool:
@@ -240,11 +244,37 @@ def assemble(
         notes.append(
             "TWILIO_AUTH_TOKEN unset — inbound webhooks cannot be signature-verified"
         )
-    gateway = default_gateway(twilio_auth_token=twilio_token)
+
+    # The public base URL Twilio signs against. Configured, never derived from
+    # the request: a Cloudflare tunnel rewrites `Host`, so validating against
+    # the delivered header would refuse every webhook and the product would
+    # simply appear dead (`MOD-01` §6.1). `TUNNEL_HOST` is the hostname the
+    # tunnel publishes. Without it, signature validation has nothing to check
+    # against and inbound calls cannot be trusted.
+    tunnel_host = (settings.env.get("TUNNEL_HOST", "") or "").strip()
+    public_base_url = f"https://{tunnel_host}".rstrip("/") if tunnel_host else ""
+    if not public_base_url:
+        notes.append(
+            "TUNNEL_HOST unset — Twilio has no address to call back, so inbound "
+            "voice cannot be signature-verified"
+        )
+
+    gateway = default_gateway(
+        twilio_auth_token=twilio_token, public_base_url=public_base_url
+    )
 
     admission = AdmissionController(
         max_concurrent_calls=settings.speech.max_concurrent_calls
     )
+
+    # The voice engine reads its admission registry from `voice_admission.REGISTRY`
+    # (voice.py imports that name inside each call). Install the controller
+    # assembled above, so voice capacity *is* the controller the surfaces admit
+    # against — with two separate controllers the box would admit calls the rest
+    # of the app had refused, and the ceiling would not hold.
+    from .voice_admission import install as install_voice_registry
+
+    install_voice_registry(admission)
 
     # -- observability -----------------------------------------------------
     metrics = MetricsRegistry()
@@ -321,6 +351,26 @@ def assemble(
     chat = ChatSurface(orchestrator, answers=answers, retriever=retriever, leads=leads,
                        sentiment=observer)
 
+    # The voice path answers through the *same* engine instance as chat — one
+    # answer tree, so a caller and a web buyer asking the same question cannot
+    # be told different things. Installed into the engine's module-level seam
+    # because voice.py imports the name inside the method that uses it.
+    from .voice_pipeline import install as install_voice_answer
+
+    install_voice_answer(orchestrator, chat.engine)
+
+    # The Twilio ingress (US-001): signature, then admission, then TwiML — in
+    # that order. Built from the same admission controller the rest of the app
+    # uses, so a call refused here is a call the platform knows it refused.
+    from .voice_webhook import VoiceWebhook
+
+    voice = VoiceWebhook(
+        auth_token=twilio_token,
+        public_base_url=public_base_url,
+        admission=admission,
+        callback_number=settings.env.get("ANITA_CALLBACK_NUMBER", ""),
+    )
+
     admin = AdminSurface(
         registry=registry, gateway=gateway, admission=admission,
         metrics=metrics, gate=gate, traces=traces,
@@ -332,12 +382,16 @@ def assemble(
         admin=admin,
         admin_token=settings.env.get("ANITA_ADMIN_TOKEN", ""),
         gate_answerer=_gate_answerer(chat, retriever),
+        voice=voice,
     )
 
     for note in notes:
         logger.warning("degraded: %s", note)
 
-    built = Assembly(settings=settings, router=router, chat=chat, admin=admin, notes=notes)
+    built = Assembly(
+        settings=settings, router=router, chat=chat, admin=admin, notes=notes,
+        voice=voice,
+    )
     built.sentiment = observer
     return built
 

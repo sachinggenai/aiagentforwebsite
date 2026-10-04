@@ -1,0 +1,33 @@
+# ANITA MEDICAL SYSTEMS platform.
+#
+# MOD-09 (config / isolation / boot) needs almost nothing: the config auditor is
+# deliberately stdlib-only so it can run before any dependency is installed.
+# The remaining entries are for the modules that follow.
+
+# --- Core ---
+PyYAML>=6.0,<7.0
+
+# --- Web / API (MOD-01, MOD-10) ---
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+python-multipart>=0.0.9
+httpx>=0.28,<1.0
+python-dotenv>=1.0,<2.0
+
+# --- Database (MOD-06, MOD-07) ---
+psycopg2-binary>=2.9,<3.0
+
+# --- Telephony (MOD-01) ---
+twilio>=9.3,<10.0
+
+# --- Retrieval (MOD-03) ---
+chromadb>=1.0,<2.0
+
+# --- Speech (MOD-05) ---
+numpy>=1.26          # required at import time by the migrated voice engine
+faster-whisper>=1.1,<2.0
+kokoro-onnx>=0.4,<1.0
+onnxruntime>=1.18
+
+# --- Dev / test ---
+pytest>=8.0,<9.0

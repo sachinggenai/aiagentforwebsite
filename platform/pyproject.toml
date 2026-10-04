@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "anita-platform"
+version = "0.1.0"
+description = "ANITA MEDICAL SYSTEMS — product marketing & support platform"
+requires-python = ">=3.11"
+
+[tool.setuptools]
+package-dir = { "" = "app" }
+
+[tool.setuptools.packages.find]
+where = ["app"]
+
+[tool.pytest.ini_options]
+# `app/` is the source root: the package is `anita`, so `python -m anita.boot`
+# resolves once `app` is importable.
+pythonpath = ["app"]
+testpaths = ["tests"]

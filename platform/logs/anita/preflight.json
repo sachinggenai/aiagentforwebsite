@@ -1,0 +1,48 @@
+{
+  "ok": true,
+  "exit_code": 0,
+  "phases": [
+    {
+      "phase": "LOAD",
+      "ok": true,
+      "detail": "config loaded from default",
+      "failures": []
+    },
+    {
+      "phase": "AUDIT",
+      "ok": true,
+      "detail": "25 key(s) live, 16 pending (modules not yet built)",
+      "failures": []
+    },
+    {
+      "phase": "ISOLATION",
+      "ok": true,
+      "detail": "db=anita_ams/anita collection=anita_ams__v1 ports=8100,8601,8602",
+      "failures": []
+    },
+    {
+      "phase": "SECRETS",
+      "ok": true,
+      "detail": "ANITA_ADMIN_TOKEN=set",
+      "failures": []
+    },
+    {
+      "phase": "PLATFORM",
+      "ok": true,
+      "detail": "device=cpu backend=ollama model=qwen2.5:14b voice_capable=False \u2014 nvidia-smi present but torch is not installed (voice will be refused at admission)",
+      "failures": []
+    },
+    {
+      "phase": "DATA",
+      "ok": true,
+      "detail": "corpus ok (139 chunks)",
+      "failures": []
+    },
+    {
+      "phase": "WARM",
+      "ok": true,
+      "detail": "ollama reachable (HTTP 200)",
+      "failures": []
+    }
+  ]
+}

@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en-IN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ANITA — Operations Console</title>
+<style>
+  /* Tokens first, dark mode by media query and by explicit override, matching
+     the buyer chat page so the two read as one product. */
+  :root {
+    --bg:#0f1319; --panel:#161c24; --panel2:#1d242e; --ink:#e8ecf1; --muted:#8e99a8;
+    --line:#252d38; --brand:#3d9fd0; --ok:#2e9e5b; --warn:#d0932b; --bad:#d0533f;
+    --radius:10px;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f4f6f8; --panel:#fff; --panel2:#eef1f5; --ink:#12161c; --muted:#5b6472;
+            --line:#dfe3e9; --brand:#0b5d8a; --ok:#1e7a45; --warn:#9a6c14; --bad:#b03a28; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  header { display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+           padding:14px 18px; background:var(--panel); border-bottom:1px solid var(--line); }
+  header h1 { font-size:15px; margin:0; font-weight:600; }
+  .spacer { flex:1; }
+  .pill { font-size:11.5px; padding:3px 9px; border-radius:11px; background:var(--panel2);
+          color:var(--muted); border:1px solid var(--line); }
+  button, input { font:inherit; }
+  button { background:var(--brand); color:#fff; border:0; border-radius:7px;
+           padding:8px 14px; font-weight:600; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--ink); border:1px solid var(--line); }
+  button:disabled { opacity:.5; cursor:default; }
+  input { background:var(--bg); color:var(--ink); border:1px solid var(--line);
+          border-radius:7px; padding:8px 11px; min-width:0; }
+  main { padding:18px; display:grid; gap:18px;
+         grid-template-columns:repeat(auto-fit, minmax(340px, 1fr)); align-items:start; }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
+            padding:14px 16px; }
+  section h2 { font-size:12px; text-transform:uppercase; letter-spacing:.06em;
+               color:var(--muted); margin:0 0 12px; font-weight:700; }
+  .wide { grid-column:1 / -1; }
+  .row { display:flex; align-items:center; gap:9px; padding:7px 0;
+         border-bottom:1px solid var(--line); }
+  .row:last-child { border-bottom:0; }
+  .led { width:9px; height:9px; border-radius:50%; background:var(--muted); flex:none; }
+  .led.ok { background:var(--ok); } .led.bad { background:var(--bad); }
+  .led.unknown { background:var(--warn); }
+  .name { font-weight:600; }
+  .detail { color:var(--muted); font-size:12.5px; }
+  /* Absence is not zero: an unmeasured value is styled differently from a
+     measured one so it cannot be skimmed as "all clear". */
+  .unavailable { color:var(--warn); font-style:italic; }
+  .zero { color:var(--muted); }
+  .value { font-variant-numeric:tabular-nums; }
+  pre { background:var(--panel2); border:1px solid var(--line); border-radius:8px;
+        padding:11px; overflow:auto; max-height:340px; margin:0; font-size:12.5px;
+        white-space:pre-wrap; word-break:break-word; }
+  .empty { color:var(--muted); padding:14px 0; text-align:center; }
+  .err { color:var(--bad); }
+  .trace { border-left:2px solid var(--line); padding-left:12px; margin:9px 0; }
+  .trace .who { font-size:11.5px; color:var(--muted); text-transform:uppercase;
+                letter-spacing:.04em; }
+  .trace.user { border-left-color:var(--brand); }
+  .trace.failed { border-left-color:var(--bad); }
+  dialog { background:var(--panel); color:var(--ink); border:1px solid var(--line);
+           border-radius:var(--radius); max-width:640px; width:92vw; padding:0; }
+  dialog::backdrop { background:rgba(0,0,0,.55); }
+  .dialog-head { display:flex; align-items:center; gap:10px; padding:13px 16px;
+                 border-bottom:1px solid var(--line); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Operations Console</h1>
+  <span class="pill" id="instance">ANITA instance</span>
+  <span class="pill" id="poll">polling every 2 s</span>
+  <span class="spacer"></span>
+  <input type="password" id="token" placeholder="Admin token" aria-label="Admin token"
+         style="width:200px">
+  <button id="connect">Connect</button>
+  <button class="ghost" id="disconnect" disabled>Disconnect</button>
+</header>
+
+<main>
+  <section>
+    <h2>Channels</h2>
+    <div id="channels"><div class="empty">Not connected.</div></div>
+  </section>
+
+  <section>
+    <h2>Metrics</h2>
+    <div id="metrics"><div class="empty">Not connected.</div></div>
+  </section>
+
+  <section>
+    <h2>Release gate</h2>
+    <p class="detail" style="margin-top:0">
+      Runs the frozen evaluation set. A failing gate blocks index promotion.
+    </p>
+    <button id="runGate">Run gate</button>
+    <div id="gate" style="margin-top:11px"></div>
+  </section>
+
+  <section class="wide">
+    <h2>Conversations</h2>
+    <div id="conversations"><div class="empty">Not connected.</div></div>
+  </section>
+</main>
+
+<dialog id="viewer">
+  <div class="dialog-head">
+    <strong id="viewerTitle">Conversation</strong>
+    <span class="spacer"></span>
+    <button class="ghost" id="closeViewer">Close</button>
+  </div>
+  <div style="padding:14px 16px"><div id="viewerBody"></div></div>
+</dialog>
+
+<script>
+"use strict";
+const API = window.location.origin;
+
+// Token lives in sessionStorage, not localStorage: this console is opened
+// deliberately and should not leave a credential on a shared workstation.
+// It is never written to a URL or a log.
+let token = sessionStorage.getItem("anita-admin") || "";
+let timer = null;
+
+const $ = (id) => document.getElementById(id);
+
+function unavailable(reason) {
+  return '<div class="row"><span class="led unknown"></span>' +
+         '<span class="unavailable">unavailable' +
+         (reason ? ' — ' + esc(reason) : '') + '</span></div>';
+}
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) =>
+    ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
+}
+
+async function api(route, options = {}) {
+  const res = await fetch(API + route, {
+    ...options,
+    headers: {
+      "Authorization": "Bearer " + token,
+      "Content-Type": "application/json",
+      ...(options.headers || {}),
+    },
+  });
+  let body = {};
+  try { body = await res.json(); } catch { /* empty body is fine */ }
+  return { status: res.status, ok: res.ok, body };
+}
+
+// --- channels --------------------------------------------------------------
+async function loadChannels() {
+  const { ok, status, body } = await api("/api/admin/channels");
+  const host = $("channels");
+  if (status === 401) { host.innerHTML = '<div class="err">Not authorised.</div>'; return; }
+  if (!ok || body.unavailable) {
+    host.innerHTML = unavailable(body.reason || ("HTTP " + status));
+    return;
+  }
+  host.innerHTML = (body.channels || []).map((c) => {
+    // healthy === null means unmeasured; that must not read as "down".
+    const cls = c.healthy === null || c.unavailable ? "unknown" : (c.healthy ? "ok" : "bad");
+    const label = c.healthy === null || c.unavailable ? "unavailable" : (c.healthy ? "healthy" : "down");
+    return '<div class="row"><span class="led ' + cls + '"></span>' +
+           '<span class="name">' + esc(c.name) + '</span>' +
+           '<span class="spacer"></span><span class="detail">' + esc(label) + '</span></div>';
+  }).join("") || '<div class="empty">No channels registered.</div>';
+
+  const flags = [];
+  flags.push("signature validation " + (body.signature_validation ? "on" : "OFF"));
+  if (body.rate_limit) flags.push(body.rate_limit.limit + " req / " + body.rate_limit.window_s + "s");
+  host.insertAdjacentHTML("beforeend",
+    '<div class="row"><span class="detail">' + esc(flags.join(" · ")) + '</span></div>');
+}
+
+// --- metrics ---------------------------------------------------------------
+async function loadMetrics() {
+  const { ok, body } = await api("/api/admin/metrics");
+  const host = $("metrics");
+  if (!ok || body.unavailable) { host.innerHTML = unavailable(body.reason); return; }
+  host.innerHTML = (body.metrics || []).map((line) => {
+    const isAbsent = /unavailable/.test(line);
+    const isZero = /:\s*0(\.0)?\s*$/.test(line);
+    const cls = isAbsent ? "unavailable" : (isZero ? "zero" : "value");
+    return '<div class="row"><span class="' + cls + '">' + esc(line) + '</span></div>';
+  }).join("") || '<div class="empty">No metrics reported.</div>';
+}
+
+// --- conversations ---------------------------------------------------------
+async function loadConversations() {
+  const { ok, status, body } = await api("/api/admin/conversations");
+  const host = $("conversations");
+  if (status === 401) { host.innerHTML = '<div class="err">Not authorised.</div>'; return; }
+  if (!ok || body.unavailable) { host.innerHTML = unavailable(body.reason); return; }
+  const list = body.conversations || [];
+  if (!list.length) {
+    // An empty list and a broken registry look identical on screen unless the
+    // page says which it is — so it says nothing rather than guessing.
+    host.innerHTML = '<div class="empty">No conversations.</div>';
+    return;
+  }
+  // In the list `turns` is a count; in the detail endpoint it is the array of
+  // turns. Same name, two shapes — the list uses it as a number, the viewer
+  // iterates it.
+  host.innerHTML = list.map((c) =>
+    '<div class="row"><span class="led ' + (c.state === "active" ? "ok" : "") + '"></span>' +
+    '<span class="name">' + esc((c.channels_seen || []).join(" + ") || "—") + '</span>' +
+    '<span class="detail">' + c.turns + ' turns · ' + esc(c.state) + '</span>' +
+    '<span class="spacer"></span>' +
+    '<button class="ghost" data-open="' + esc(c.conversation_id) + '">Review</button></div>'
+  ).join("");
+}
+
+async function openConversation(id) {
+  const { ok, body } = await api("/api/admin/conversation?conversation_id=" + encodeURIComponent(id));
+  $("viewerTitle").textContent = "Conversation " + id.slice(0, 8);
+  const host = $("viewerBody");
+  if (!ok) { host.innerHTML = '<div class="err">' + esc(body.error || "Could not load") + '</div>'; }
+  else {
+    host.innerHTML = (body.turns || []).map((t) => {
+      const cls = t.failed ? "failed" : (t.role === "user" ? "user" : "");
+      const meta = [t.role, t.intent, t.failed ? "FAILED" : null].filter(Boolean).join(" · ");
+      return '<div class="trace ' + cls + '"><div class="who">' + esc(meta) + '</div>' +
+             '<div>' + esc(t.content) + '</div></div>';
+    }).join("") || '<div class="empty">No turns.</div>';
+  }
+  $("viewer").showModal();
+}
+
+// --- release gate ----------------------------------------------------------
+async function runGate() {
+  const host = $("gate");
+  host.innerHTML = '<span class="detail">Running…</span>';
+  // The console cannot answer the questions itself; the backend supplies the
+  // answers. A gate run from here validates the *current* live configuration.
+  const { ok, body } = await api("/api/admin/gate", { method: "POST", body: "{}" });
+  if (!ok || body.unavailable) { host.innerHTML = unavailable(body.reason); return; }
+  const cls = body.passed ? "ok" : "bad";
+  const label = body.passed ? "PASSED" : "BLOCKED";
+  // grounded_rate is null when the set is empty — shown as unavailable, not as
+  // 0%, because "nothing was measured" and "nothing was grounded" differ.
+  const rate = body.grounded_rate === null || body.grounded_rate === undefined
+    ? '<span class="unavailable">grounded rate unavailable</span>'
+    : Math.round(body.grounded_rate * 100) + "% grounded";
+  host.innerHTML =
+    '<div class="row"><span class="led ' + cls + '"></span>' +
+    '<span class="name">' + label + '</span>' +
+    '<span class="detail">' + body.total + ' cases · ' + rate +
+    ' · ' + body.duration_ms + ' ms</span></div>' +
+    '<div class="detail">' + esc(body.reason || "") + '</div>' +
+    ((body.failed || []).length
+      ? '<pre>' + esc(body.failed.join("\n")) + '</pre>' : "");
+}
+
+// --- polling ---------------------------------------------------------------
+// 2 s polling, deliberately NOT Server-Sent Events: the source platform
+// documented that a Cloudflare tunnel returns SSE headers but never the body
+// (REC-16), so a stream that looks connected would silently stop updating.
+function refresh() {
+  loadChannels().catch(() => {});
+  loadMetrics().catch(() => {});
+  loadConversations().catch(() => {});
+}
+
+function connect() {
+  token = $("token").value.trim();
+  if (!token) { $("token").focus(); return; }
+  sessionStorage.setItem("anita-admin", token);
+  $("token").value = "";
+  $("instance").textContent = "connected";
+  $("connect").disabled = true;
+  $("disconnect").disabled = false;
+  refresh();
+  timer = setInterval(refresh, 2000);
+}
+
+function disconnect() {
+  clearInterval(timer); timer = null;
+  sessionStorage.removeItem("anita-admin");
+  token = "";
+  $("instance").textContent = "disconnected";
+  $("connect").disabled = false;
+  $("disconnect").disabled = true;
+  ["channels", "metrics", "conversations", "gate"].forEach((id) => {
+    $(id).innerHTML = '<div class="empty">Not connected.</div>';
+  });
+}
+
+$("connect").addEventListener("click", connect);
+$("disconnect").addEventListener("click", disconnect);
+$("runGate").addEventListener("click", runGate);
+$("closeViewer").addEventListener("click", () => $("viewer").close());
+$("token").addEventListener("keydown", (e) => e.key === "Enter" && connect());
+document.addEventListener("click", (e) => {
+  const id = e.target.getAttribute && e.target.getAttribute("data-open");
+  if (id) openConversation(id);
+});
+
+if (token) { $("token").value = token; connect(); }
+</script>
+</body>
+</html>

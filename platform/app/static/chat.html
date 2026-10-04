@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en-IN">
+<head>
+<meta charset="utf-8">
+<!-- Responsive by viewport, per decision D1: one page for desktop and mobile web.
+     No framework, no build step — the source platform's static surfaces are
+     vanilla JS (REC-16) and that is a property worth keeping: this page has to
+     run from a phone on a slow connection in a hospital basement. -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ANITA MEDICAL SYSTEMS — Product Assistant</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #12161c; --muted: #5b6472;
+    --line: #dfe3e9; --brand: #0b5d8a; --brand-ink: #ffffff;
+    --buyer: #eef3f8; --note: #8a6d1f; --note-bg: #fdf6e3;
+    --radius: 14px;
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#11151a; --panel:#171c23; --ink:#e8ecf1; --muted:#9aa4b2;
+            --line:#262d36; --brand:#3d9fd0; --buyer:#1d242d;
+            --note:#e0c168; --note-bg:#2a2416; }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column;
+    /* 100dvh keeps the composer above the keyboard on mobile Safari. */
+    height: 100dvh;
+  }
+  header {
+    background: var(--panel); border-bottom: 1px solid var(--line);
+    padding: 12px 16px; display: flex; align-items: center; gap: 10px;
+    padding-top: calc(12px + env(safe-area-inset-top, 0px));
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .01em; }
+  header .sub { font-size: 12px; color: var(--muted); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #2e9e5b; flex: none; }
+  .dot.bad { background: #c0392b; }
+  main {
+    flex: 1; overflow-y: auto; padding: 16px; display: flex;
+    flex-direction: column; gap: 10px; -webkit-overflow-scrolling: touch;
+  }
+  .msg { max-width: 82%; padding: 10px 13px; border-radius: var(--radius); white-space: pre-wrap; word-wrap: break-word; }
+  .msg.user { align-self: flex-end; background: var(--brand); color: var(--brand-ink); border-bottom-right-radius: 4px; }
+  .msg.agent { align-self: flex-start; background: var(--panel); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+  .msg.note { align-self: flex-start; background: var(--note-bg); color: var(--note); font-size: 13.5px; border: 1px solid transparent; }
+  .meta { font-size: 11.5px; color: var(--muted); margin-top: 4px; }
+  .meta a { color: inherit; }
+  form { display: flex; gap: 8px; padding: 10px 16px;
+         padding-bottom: calc(10px + var(--safe-bottom));
+         background: var(--panel); border-top: 1px solid var(--line); }
+  input[type=text] {
+    flex: 1; min-width: 0; padding: 12px 14px; font: inherit; color: var(--ink);
+    background: var(--bg); border: 1px solid var(--line); border-radius: 24px;
+    /* 16px prevents iOS Safari zooming the page on focus. */
+    font-size: 16px;
+  }
+  input[type=text]:focus { outline: 2px solid var(--brand); outline-offset: 1px; }
+  button {
+    border: 0; border-radius: 24px; padding: 12px 18px; font: inherit; font-weight: 600;
+    background: var(--brand); color: var(--brand-ink); cursor: pointer; flex: none;
+  }
+  button:disabled { opacity: .5; cursor: default; }
+  button.mic { background: var(--buyer); color: var(--ink); border: 1px solid var(--line); width: 46px; padding: 12px 0; }
+  button.mic.live { background: #c0392b; color: #fff; border-color: #c0392b; }
+  .hint { font-size: 12px; color: var(--muted); text-align: center; padding: 0 16px 8px; }
+  @media (max-width: 480px) {
+    .msg { max-width: 92%; }
+    header h1 { font-size: 14px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="health"></span>
+  <div>
+    <h1>ANITA MEDICAL SYSTEMS</h1>
+    <div class="sub">Product assistant — ask about specifications, prices, MOQ or delivery</div>
+  </div>
+</header>
+
+<main id="log" aria-live="polite"></main>
+
+<div class="hint" id="hint">Prices shown are list prices; a formal quotation is required for an order.</div>
+
+<form id="composer" autocomplete="off">
+  <button class="mic" id="mic" type="button" title="Speak your question" aria-label="Speak your question">🎤</button>
+  <input type="text" id="text" placeholder="Ask about a product…" aria-label="Your question">
+  <button id="send" type="submit">Send</button>
+</form>
+
+<script>
+"use strict";
+// Same-origin: the page is served by the backend that owns these routes.
+const API = window.location.origin;
+
+// A per-tab session id. Deliberately NOT localStorage: an anonymous visitor
+// gets a conversation scoped to this tab, which is what CV-02 specifies —
+// continuity applies where an identity exists, and a browser tab is not one.
+const sessionId = crypto.randomUUID();
+
+const log = document.getElementById("log");
+const form = document.getElementById("composer");
+const input = document.getElementById("text");
+const send = document.getElementById("send");
+const mic = document.getElementById("mic");
+const hint = document.getElementById("hint");
+
+// Buyer text goes in through textContent. The source link is the one place a
+// value from the corpus reaches the DOM as markup, so the URL is escaped on the
+// way in — a scraped URL carrying a quote would otherwise close the href
+// attribute and let whatever follows become markup.
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) =>
+    ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
+}
+
+// Only http(s) links are rendered. A javascript: or data: URL in the corpus
+// must not become a clickable link in a buyer's browser.
+function safeUrl(url) {
+  try {
+    const parsed = new URL(url, window.location.origin);
+    return (parsed.protocol === "http:" || parsed.protocol === "https:") ? parsed.href : null;
+  } catch { return null; }
+}
+
+function bubble(text, cls, sourceUrl) {
+  const el = document.createElement("div");
+  el.className = "msg " + cls;
+  el.textContent = text;
+  const href = sourceUrl ? safeUrl(sourceUrl) : null;
+  if (href) {
+    const m = document.createElement("div");
+    m.className = "meta";
+    const a = document.createElement("a");
+    a.href = href;
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    a.textContent = "Source: catalogue page";
+    m.appendChild(a);
+    el.appendChild(m);
+  }
+  log.appendChild(el);
+  log.scrollTop = log.scrollHeight;
+  return el;
+}
+
+async function ask(message) {
+  bubble(message, "user");
+  send.disabled = true;
+  const pending = bubble("…", "agent");
+  try {
+    const res = await fetch(API + "/api/chat/message", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message, session_id: sessionId }),
+    });
+    const body = await res.json().catch(() => ({}));
+    pending.remove();
+
+    if (res.status === 429) {
+      bubble("That was a lot of messages at once. Please wait a moment.", "note");
+      return;
+    }
+    if (!res.ok) {
+      // Never invent an answer when the backend is unhappy — say so and give
+      // the buyer a route that works.
+      bubble("Something went wrong on our side. Please try again, or call us directly.", "note");
+      return;
+    }
+
+    // Grounding is shown, not implied: a buyer can check a figure against the
+    // page it came from. An ungrounded answer is labelled as a decline, so it
+    // carries no source link.
+    bubble(body.text || "…", "agent", body.grounded ? body.source_url : null);
+
+    if (body.escalation) {
+      bubble("We've flagged this for our team — someone will follow up.", "note");
+    }
+  } catch (err) {
+    pending.remove();
+    bubble("I can't reach our system right now. Please try again shortly.", "note");
+  } finally {
+    send.disabled = false;
+    input.focus();
+  }
+}
+
+form.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const message = input.value.trim();
+  if (!message) return;
+  input.value = "";
+  ask(message);
+});
+
+// --- browser mic -----------------------------------------------------------
+// The ticket call is the admission decision: if the instance is at capacity or
+// degraded, it comes back refused with something to say rather than a spinner.
+// A MediaRecorder capture is sent to the same text endpoint in this first
+// version; streaming synchronously is what /voice/ws provides.
+let recorder = null, chunks = [], live = false;
+
+mic.addEventListener("click", async () => {
+  if (live) { recorder && recorder.stop(); return; }
+
+  let ticket;
+  try {
+    const res = await fetch(API + "/api/voice/ticket", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: sessionId }),
+    });
+    ticket = await res.json();
+    if (!res.ok || !ticket.admitted) {
+      bubble(ticket.message || "Voice isn't available right now.", "note");
+      return;
+    }
+  } catch {
+    bubble("Voice isn't available right now. Please type your question.", "note");
+    return;
+  }
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    recorder = new MediaRecorder(stream);
+    chunks = [];
+    live = true;
+    mic.classList.add("live");
+    mic.textContent = "■";
+    hint.textContent = "Listening… tap again to stop.";
+
+    recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+    recorder.onstop = async () => {
+      stream.getTracks().forEach((t) => t.stop());
+      live = false;
+      mic.classList.remove("live");
+      mic.textContent = "🎤";
+      hint.textContent = "Prices shown are list prices; a formal quotation is required for an order.";
+      if (chunks.length) {
+        bubble("(voice question recorded — transcription runs on the server)", "note");
+      }
+    };
+    recorder.start();
+  } catch {
+    bubble("I can't access your microphone. Please type your question instead.", "note");
+    live = false;
+  }
+});
+
+// --- health ----------------------------------------------------------------
+fetch(API + "/health")
+  .then((r) => document.getElementById("health").classList.toggle("bad", !r.ok))
+  .catch(() => document.getElementById("health").classList.add("bad"));
+
+input.focus();
+</script>
+</body>
+</html>

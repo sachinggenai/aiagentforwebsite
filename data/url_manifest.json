@@ -1,0 +1,244 @@
+{
+  "generated_at": "2026-10-03T17:49:30.835467Z",
+  "base_url": "https://www.anitamedicalsystems.com",
+  "total": 32,
+  "by_type": {
+    "home": 1,
+    "product": 24,
+    "company_profile": 1,
+    "contact": 1,
+    "category": 3,
+    "products_index": 1,
+    "sitemap_page": 1
+  },
+  "entries": [
+    {
+      "url": "https://www.anitamedicalsystems.com",
+      "path": "/",
+      "page_type": "home",
+      "source": "both",
+      "priority": null
+    },
+    {
+      "url": "https://www.anitamedicalsystems.com/apollo-rt-cath-lab-pressure-injector-rt-150-6835567.html",
+      "path": "/apollo-rt-cath-lab-pressure-injector-rt-150-6835567.html",
+      "page_type": "product",
+      "source": "both",
+      "priority": null
+    },
+    {
+      "url": "https://www.anitamedicalsystems.com/apollo-rt-ct-dual-head-pressure-injector-apo-200-6835421.html",
+      "path": "/apollo-rt-ct-dual-head-pressure-injector-apo-200-6835421.html",
+      "page_type": "product",
+      "source": "both",
+      "priority": null
+    },
+    {
+      "url": "https://www.anitamedicalsystems.com/apollo-rt-ct-single-head-pressure-injector-apo-100-6797484.html",
+      "path": "/apollo-rt-ct-single-head-pressure-injector-apo-100-6797484.html",
+      "page_type": "product",
+      "source": "both",
+      "priority": null
+    },
+    {
+      "url": "https://www.anitamedicalsystems.com/company-profile.html",
+      "path": "/company-profile.html",
+      "page_type": "company_profile",
+      "source": "both",
+      "priority": null
+    },
+    {
+      "url": "https://www.anitamedicalsystems.com/contact-us.html",
+      "path": "/contact-us.html",
+      "page_type": "contact",
+      "source": "both",
+      "priority": null
+    },
+    {
+      "url": "https://www.anitamedicalsystems.com/doctor-protective-apparel-270693.html",
+      "path": "/doctor-protective-apparel-270693.html",
+      "page_type": "product",
+      "source": "both",
+      "priority": null
+    },
+    {
+      "url": "https://www.anitamedicalsystems.com/dry-imager-3935252.html",
+      "path": "/dry-imager-3935252.html",
+      "page_type": "product",
+      "source": "both",
+      "priority": null
+    },
+    {
+      "url": "https://www.anitamedicalsystems.com/fcr-capsula-x-imaging-systems-270680.html",
+      "path": "/fcr-capsula-x-imaging-systems-270680.html",
+      "page_type": "product",
+      "source": "both",
+      "priority": null
+    },
+    {
+      "url": "https://www.anitamedicalsystems.com/fcr-prima-t-image-reader-3935247.html",
+      "path": "/fcr-prima-t-image-reader-3935247.html",
+      "page_type": "product",
+      "source": "both",
+      "priority": null
+    },
+    {
+      "url": "https://www.anitamedicalsystems.com/fcr-prima-t2-image-reader-3935248.html",
+      "path": "/fcr-prima-t2-image-reader-3935248.html",
+      "page_type": "product",
+      "source": "both",
+      "priority": null
+    },
+    {
+      "url": "https://www.anitamedicalsystems.com/fcr-prima-tm-imaging-equipment-3935249.html",
+      "path": "/fcr-prima-tm-imaging-equipment-3935249.html",
+      "page_type": "product",
+      "source": "both",
+      "priority": null
+    },
+    {
+      "url": "https://www.anitamedicalsystems.com/fuji-computed-radiography-system-381893.html",
+      "path": "/fuji-computed-radiography-system-381893.html",
+      "page_type": "product",
+      "source": "both",
+      "priority": null
+    },
+    {
+      "url": "https://www.anitamedicalsystems.com/fuji-cr-imaging-systems.html",
+      "path": "/fuji-cr-imaging-systems.html",
+      "page_type": "category",
+      "source": "both",
+      "priority": null
+    },
+    {
+      "url": "https://www.anitamedicalsystems.com/fujifilm-fcr-profect-cs-dry-imager-270681.html",
+      "path": "/fujifilm-fcr-profect-cs-dry-imager-270681.html",
+      "page_type": "product",
+      "source": "both",
+      "priority": null
+    },
+    {
+      "url": "https://www.anitamedicalsystems.com/high-pressure-syringe-tubing-6836883.html",
+      "path": "/high-pressure-syringe-tubing-6836883.html",
+      "page_type": "product",
+      "source": "both",
+      "priority": null
+    },
+    {
+      "url": "https://www.anitamedicalsystems.com/medical-dry-imager-270683.html",
+      "path": "/medical-dry-imager-270683.html",
+      "page_type": "product",
+      "source": "both",
+      "priority": null
+    },
+    {
+      "url": "https://www.anitamedicalsystems.com/medical-dry-imager-3935251.html",
+      "path": "/medical-dry-imager-3935251.html",
+      "page_type": "product",
+      "source": "both",
+      "priority": null
+    },
+    {
+      "url": "https://www.anitamedicalsystems.com/medical-dry-laser-imager-3935250.html",
+      "path": "/medical-dry-laser-imager-3935250.html",
+      "page_type": "product",
+      "source": "both",
+      "priority": null
+    },
+    {
+      "url": "https://www.anitamedicalsystems.com/microbar-enema-270686.html",
+      "path": "/microbar-enema-270686.html",
+      "page_type": "product",
+      "source": "both",
+      "priority": null
+    },
+    {
+      "url": "https://www.anitamedicalsystems.com/microbar-paste-270685.html",
+      "path": "/microbar-paste-270685.html",
+      "page_type": "product",
+      "source": "both",
+      "priority": null
+    },
+    {
+      "url": "https://www.anitamedicalsystems.com/microbar-powder-270687.html",
+      "path": "/microbar-powder-270687.html",
+      "page_type": "product",
+      "source": "both",
+      "priority": null
+    },
+    {
+      "url": "https://www.anitamedicalsystems.com/microbar-products.html",
+      "path": "/microbar-products.html",
+      "page_type": "category",
+      "source": "both",
+      "priority": null
+    },
+    {
+      "url": "https://www.anitamedicalsystems.com/products.html",
+      "path": "/products.html",
+      "page_type": "products_index",
+      "source": "both",
+      "priority": null
+    },
+    {
+      "url": "https://www.anitamedicalsystems.com/sitemap.html",
+      "path": "/sitemap.html",
+      "page_type": "sitemap_page",
+      "source": "link",
+      "priority": null
+    },
+    {
+      "url": "https://www.anitamedicalsystems.com/ultrasound-gel-270694.html",
+      "path": "/ultrasound-gel-270694.html",
+      "page_type": "product",
+      "source": "both",
+      "priority": null
+    },
+    {
+      "url": "https://www.anitamedicalsystems.com/x-ray-accessories.html",
+      "path": "/x-ray-accessories.html",
+      "page_type": "category",
+      "source": "both",
+      "priority": null
+    },
+    {
+      "url": "https://www.anitamedicalsystems.com/x-ray-cassette-270691.html",
+      "path": "/x-ray-cassette-270691.html",
+      "page_type": "product",
+      "source": "both",
+      "priority": null
+    },
+    {
+      "url": "https://www.anitamedicalsystems.com/x-ray-film-developing-hanger-270689.html",
+      "path": "/x-ray-film-developing-hanger-270689.html",
+      "page_type": "product",
+      "source": "both",
+      "priority": null
+    },
+    {
+      "url": "https://www.anitamedicalsystems.com/x-ray-film-drying-cabinet-270690.html",
+      "path": "/x-ray-film-drying-cabinet-270690.html",
+      "page_type": "product",
+      "source": "both",
+      "priority": null
+    },
+    {
+      "url": "https://www.anitamedicalsystems.com/x-ray-film-viewing-boxes-270688.html",
+      "path": "/x-ray-film-viewing-boxes-270688.html",
+      "page_type": "product",
+      "source": "both",
+      "priority": null
+    },
+    {
+      "url": "https://www.anitamedicalsystems.com/xray-intensifying-screen-270692.html",
+      "path": "/xray-intensifying-screen-270692.html",
+      "page_type": "product",
+      "source": "both",
+      "priority": null
+    }
+  ],
+  "sitemap_only": [],
+  "link_only": [
+    "https://www.anitamedicalsystems.com/sitemap.html"
+  ]
+}

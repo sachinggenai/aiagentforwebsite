@@ -1,0 +1,161 @@
+# ANITA MEDICAL SYSTEMS platform — non-secret configuration.
+#
+# Secrets never live in this file. They come from the environment only
+# (see .env.example for the key NAMES). Anything whose name matches
+# TOKEN|SECRET|PASSWORD|PASSWD|KEY|CREDENTIAL|SID|AUTH is masked in every
+# render, log line and error message — only presence is ever reported.
+#
+# Isolation values below are asserted at boot against the sibling university
+# deployment. A collision refuses the boot rather than starting wrongly.
+# See docs/sdlc/modules/MOD-09-config-isolation-boot.md (TRD-41, TRD-42).
+
+isolation:
+  db_name: anita_ams
+  db_schema: anita
+  chroma_path: ./data/chroma_anita
+  chroma_collection: anita_ams__v1
+  # Own ports. The sibling product runs on
+  # 8000 / 8010 / 1234 / 5432 / 8098 / 8501 / 8502.
+  api_port: 8100
+  chat_port: 8601
+  admin_port: 8602
+  streamlit_port: 8085
+  log_dir: ./logs/anita
+
+# Values the sibling (university) deployment is known to use. The boot guard
+# refuses if any ANITA resource above equals one of these. They are config,
+# not code, because the sibling's values are the operator's knowledge - but
+# they are seeded so the guard is useful out of the box.
+isolation_forbidden:
+  db_name:
+    - admissions
+  chroma_collection:
+    - langchain
+    - meridian_kb__v1
+  port:
+    - 8000      # FastAPI
+    - 8010      # RAG MCP (ERC)
+    - 1234      # MLX
+    - 5432      # Postgres
+    - 8098      # CRM API
+    - 8501      # Streamlit (main)
+    - 8502      # Streamlit (dashboard)
+    # 11434 (Ollama) is deliberately absent - both products share one server.
+  log_dir:
+    - ./logs
+    - logs
+
+identity:
+  company_name: ANITA MEDICAL SYSTEMS PVT. LTD.
+  agent_name: Anita Assistant
+
+corpus:
+  # Produced by the scraper in src/ams/. Read-only input to MOD-03.
+  # Lives in the repository root, one level above platform/ — the scraper and
+  # the platform share one repo (decision D2), so the corpus is referenced, not
+  # duplicated.
+  out_dir: ../data/out
+  chunks_file: chunks.jsonl
+  sqlite_file: ams.sqlite
+
+model:
+  llm_provider: auto          # auto | ollama | mlx
+  ollama_url: http://127.0.0.1:11434
+  ollama_model: qwen2.5:14b
+  ollama_num_ctx: 8192
+  ollama_keep_alive: "-1m"
+  embed_model: nomic-embed-text
+  mlx_model: mlx-community/Qwen2.5-14B-Instruct-4bit
+  mlx_base_url: http://127.0.0.1:1234
+  mlx_port: 1234
+
+retrieval:
+  top_k: 5
+  fetch_k: 20
+  similarity_threshold: 0.62   # 0.0 is refused at boot (TRD-14)
+
+speech:
+  whisper_model: small.en
+  whisper_num_threads: 4
+  kokoro_voice: af_heart
+  kokoro_speed: 1.0
+  vad_silence_ms: 600
+  vad_speculative_advance_ms: 220
+  barge_in_enabled: true
+  tts_stream: true
+  max_concurrent_calls: 2
+
+sentiment:
+  w1: 0.30
+  w2: 0.30
+  w3: 0.25
+  w4: 0.15
+  ewma_lambda: 0.35
+  negative_escalation_threshold: -0.20
+
+outbound:
+  max_attempts: 3
+  window_start: "10:00"
+  window_end: "19:00"
+  timezone: Asia/Kolkata
+  poll_interval_seconds: 10
+  retry_delays_minutes: [240, 1440]
+
+# Reserved share of the shared 16,311 MiB GPU. Asserted at boot: an ANITA
+# budget that would leave the sibling less than its floor is a boot refusal,
+# not a warning (TRD-43 / AS-09).
+vram:
+  shared_card_mib: 16311
+  anita_budget_mib: 8192
+  sibling_floor_mib: 6000
+
+# ---------------------------------------------------------------------------
+# What this release does not include, and why.
+#
+# The release gate refuses promotion while a declared use case cannot be
+# triggered. That is correct — a use case nobody can reach is not a shipped
+# feature — and it is unlivable if it can never pass, because a gate that is
+# always red is a gate people route around.
+#
+# A use case listed here is deferred: a decision made and written down. The
+# gate reports it as deferred rather than failing on it. Removing an entry is
+# how a use case becomes required again, and it will then fail until it is
+# served.
+#
+# Reviewed: 2026-10-03.
+# ---------------------------------------------------------------------------
+release:
+  deferred_use_cases:
+
+    UC-02: >-
+      WhatsApp inbound. The adapter is registered in the channel gateway but no
+      webhook route is served, so an inbound message has nowhere to land.
+      Deferred until the text and lead product is validated with real buyers
+      over web chat.
+
+    UC-03: >-
+      Inbound voice call. There is no voice route in the API at all, and the
+      engine has never carried a call — no carrier, no media stream, no
+      barge-in under load. Deferred until a Twilio number is provisioned and a
+      real call can be taken, because local STT/TTS round trips do not validate
+      the path.
+
+    UC-04: >-
+      Browser-mic question. The admission ticket route is served, but there is
+      no audio path behind it: a ticket is issued and nothing consumes the
+      audio. Deferred with UC-03 — the same media path serves both.
+
+    UC-09: >-
+      Outbound follow-up. Leads are captured and qualified; the OutboundQueue
+      has no worker, so nothing is ever dialled. Deferred deliberately: placing
+      calls to real buyers needs the compliance review of DG-08 to close first.
+
+    UC-10: >-
+      Negative-sentiment escalation. anita.sentiment is complete and tested and
+      referenced by no surface. Deferred until there is an escalation
+      destination — escalating to nobody is worse than not detecting it.
+
+    UC-14: >-
+      Adding a new messaging channel. This is an extension point rather than a
+      trigger, so it is verified by design review and by the channel gateway's
+      adapter interface, not by a test that drives it.

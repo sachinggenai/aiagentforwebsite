@@ -1,0 +1,130 @@
+# Site configuration for the ANITA MEDICAL SYSTEMS collection pipeline.
+# Everything the crawler/parsers need that is site-specific lives here, so a
+# selector change never requires touching Python code.
+
+site:
+  name: "ANITA MEDICAL SYSTEMS PVT. LTD."
+  base_url: "https://www.anitamedicalsystems.com"
+  # Recorded for provenance only — never used to evade a block.
+  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+  sitemap_path: "/sitemap.xml"
+  robots_path: "/robots.txt"
+
+# ---------------------------------------------------------------------------
+# Politeness. The host returns HTTP 403 under sustained crawling (observed
+# live), so this is deliberately conservative and strictly sequential.
+# ---------------------------------------------------------------------------
+crawl:
+  concurrency: 1           # MUST stay 1 — parallel requests triggered the block
+  delay_seconds: 2.0       # minimum gap between live requests
+  timeout_seconds: 30.0
+  max_retries: 3
+  # Exponential backoff applied on 403 / 429 / 5xx.
+  backoff_seconds: [5, 15, 45]
+  # Abort the whole run after this many *consecutive* failed pages, so a block
+  # stops the crawl cleanly instead of hammering the host.
+  circuit_breaker_consecutive_failures: 5
+  # A page already cached with a 2xx is never re-fetched unless --force.
+  cache_first: true
+
+# ---------------------------------------------------------------------------
+# Page-type classification, evaluated in order against the URL path.
+# ---------------------------------------------------------------------------
+page_types:
+  - type: product
+    match: 'regex'
+    pattern: '-[0-9]{5,}\.html$'
+  - type: category
+    match: 'exact'
+    paths:
+      - /fuji-cr-imaging-systems.html
+      - /x-ray-accessories.html
+      - /microbar-products.html
+  - type: products_index
+    match: 'exact'
+    paths: [/products.html]
+  - type: company_profile
+    match: 'exact'
+    paths: [/company-profile.html]
+  - type: contact
+    match: 'exact'
+    paths: [/contact-us.html]
+  - type: sitemap_page
+    match: 'exact'
+    paths: [/sitemap.html]
+  - type: home
+    match: 'exact'
+    paths: [/]
+  - type: other
+    match: 'fallback'
+
+# ---------------------------------------------------------------------------
+# Content extraction. Sections are located by the *normalised text* of their
+# heading (matched case-insensitively) rather than by CSS class, because the
+# template's class names are numeric and change between TradeIndia releases.
+# ---------------------------------------------------------------------------
+content:
+  # Regions deleted outright before any extraction. This removes ~98% of page
+  # weight and prevents modal markup from being mistaken for real content.
+  drop_selectors:
+    - script
+    - style
+    - noscript
+    - iframe
+    - "#sendInquiry_normal"
+    - "#sendInquiry"
+    - "#reqCallBack"
+    - "#reqCallBackOtp"
+    - "#callback_registration"
+    - "#quick_inquiry_first_form"
+    - ".modal"
+    - ".popup"
+    - "#bg"
+  # Ordered section markers. `heading_contains` is matched against the text of
+  # an <h2>; the section body runs to the next heading of the same or higher level.
+  sections:
+    - key: specification
+      heading_contains: "Specification"
+    - key: trade_information
+      heading_contains: "Trade Information"
+    - key: about
+      heading_contains: "About"
+    - key: faqs
+      heading_contains: "FAQs of"
+    - key: related_products
+      heading_contains: "More Products in"
+    - key: category_intro
+      heading_contains: null   # category pages: intro copy preceding the listing
+
+  # A literal "Q:" prefix marks a real FAQ. <h3> is ALSO used for related-product
+  # names, so heading level alone over-reports FAQs by 4 per product page.
+  faq:
+    question_prefix: "Q:"
+    answer_prefix: "A:"
+
+# ---------------------------------------------------------------------------
+# Media. Manifest-only — no binaries are downloaded.
+# ---------------------------------------------------------------------------
+media:
+  download: false
+  product_image_pattern: 'https://cpimg\.tistatic\.com/(?P<product_id>[0-9]{8})/(?P<variant>[a-z]/[0-9])/(?P<name>[^/"]+)'
+  # Verified: b/3 is large (~58KB), s/3 is small (~5KB); l/3 and f/3 are 404.
+  preferred_size: "b/3"
+  thumbnail_size: "s/3"
+  # Template chrome — recorded but classified as non-content.
+  template_hosts:
+    - "tiimg.tistatic.com/catalogs/template"
+    - "tiimg.tistatic.com/new_website1"
+    - "tiimg.tistatic.com/catalogs/js"
+
+# ---------------------------------------------------------------------------
+# Output locations, relative to the project root.
+# ---------------------------------------------------------------------------
+paths:
+  raw: "data/raw"
+  pages: "data/pages"
+  out: "data/out"
+  tables: "data/out/tables"
+  reports: "data/out/reports"
+  url_manifest: "data/url_manifest.json"
+  site_shared: "data/out/site_shared.json"

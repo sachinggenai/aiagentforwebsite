@@ -23,3 +23,14 @@ __all__ = [
     "platform_detect",
     "secrets",
 ]
+
+# The repository root carries the `shared/` package — retrieval and sentiment
+# code that two products import and that imports neither. It is added once,
+# guarded, so importing this package twice cannot append a duplicate sys.path
+# entry.
+import sys as _sys
+from pathlib import Path as _Path
+
+_REPO_ROOT = _Path(__file__).resolve().parents[3]
+if str(_REPO_ROOT) not in _sys.path:
+    _sys.path.insert(0, str(_REPO_ROOT))

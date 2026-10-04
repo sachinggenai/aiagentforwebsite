@@ -23,12 +23,16 @@ than one reporting nothing.
 from __future__ import annotations
 
 import hmac
+import logging
 import re
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable, Protocol
+
+
+logger = logging.getLogger("anita.surfaces")
 
 
 class Surface(str, Enum):
@@ -253,7 +257,7 @@ class ChatSurface:
     """Web and mobile-web chat. Open to buyers, rate-limited (CV-03)."""
 
     def __init__(self, orchestrator, answers=None, retriever=None, leads=None, *,
-                 rate_limit=None) -> None:
+                 sentiment=None, rate_limit=None) -> None:
         self.orchestrator = orchestrator
         self.answers = answers
         self.retriever = retriever
@@ -261,6 +265,11 @@ class ChatSurface:
         # take a lead — and it says so rather than promising a callback it has
         # nowhere to record.
         self.leads = leads
+        # MOD-07. Optional, and *observational*: scoring the buyer's turn never
+        # changes the answer, and a failure in it never fails the turn. It
+        # exists so a negative conversation reaches a human (UC-10), which was
+        # the deferred capability this wiring closes.
+        self.sentiment = sentiment
         from .channels import RateLimiter
 
         self.rate_limit = rate_limit or RateLimiter(limit=30, window_s=60.0)
@@ -284,7 +293,30 @@ class ChatSurface:
 
         reply = self._answer(routing.intent, message, conversation)
         self.orchestrator.complete_turn(conversation, reply.text, failed=reply.unavailable)
+        self._observe_sentiment(message, conversation)
         return Response(200, reply.as_dict())
+
+    def _observe_sentiment(self, message: str, conversation) -> None:
+        """Score the buyer's turn and escalate if it warrants it.
+
+        Deliberately after the reply and outside the answer path: a sentiment
+        failure must not change what the buyer is told, and the buyer must not
+        wait on it. Everything here is swallowed for that reason.
+        """
+        if self.sentiment is None:
+            return
+        try:
+            state = self.sentiment.score_and_observe(
+                message,
+                lead_id=getattr(conversation, "lead_id", "") or conversation.conversation_id,
+                conversation_id=conversation.conversation_id,
+            )
+            if state is not None:
+                # Record it on the conversation so UC-13's review shows why a
+                # handoff exists rather than only that one does.
+                setattr(conversation, "sentiment", state)
+        except Exception:  # noqa: BLE001 - observation never breaks a turn
+            logger.exception("sentiment observation failed; the turn is unaffected")
 
     def get_history(self, *, session_id: str, limit: int = 50) -> Response:
         """The turns of this session's conversation, oldest first.
@@ -518,6 +550,43 @@ class ChatSurface:
             return base
 
         if intent is Intent.OFF_TOPIC:
+            # Ask the grounding gate before declining. The classifier is a
+            # *router* — it decides which branch to try — but it is not the
+            # authority on whether a question is about the catalogue, and
+            # treating it as one made it a second refuser that ran before the
+            # first could speak.
+            #
+            # "contrast media compatibility" is a specification field name that
+            # appears verbatim in ANITA's corpus, and it matched no classifier
+            # pattern, so it was declared off-topic and declined — while the
+            # gate, whose whole job is this question, was never consulted. The
+            # gate was fixed to admit spec names earlier; the fix was invisible
+            # because this branch refused first.
+            #
+            # Retrieval now gets its turn. An off-topic question the gate also
+            # refuses still declines, so "who won the world cup?" is unaffected.
+            # To overrule the classifier the evidence must be *positive*: a term
+            # from the catalogue's own vocabulary, not merely a vector that
+            # happens to sit nearby.
+            #
+            # This distinction is measured. "contrast media compatibility" is a
+            # specification field name and matches on `entity_match`. "do you
+            # sell MRI machines?" scores 0.666 dense similarity against a
+            # *Medical Dry Laser Imager* FAQ — above the 0.62 threshold, and
+            # nothing to do with MRI. Acting on similarity alone answered an
+            # off-topic question about a product the catalogue does not sell,
+            # and in doing so skipped the decline that offers a callback, which
+            # broke lead capture (caught by the gate's `lead:consent` case).
+            if self.retriever is not None:
+                probe = self.retriever.retrieve(message)
+                if probe.ok and probe.decision.entity_matched:
+                    base.text = _named(
+                        probe.chunks[0].chunk.product_name or "", probe.chunks[0].chunk.text
+                    )
+                    base.grounded = True
+                    base.source_url = probe.chunks[0].chunk.source_url
+                    base.intent = Intent.CATALOGUE.value
+                    return base
             base.text = DECLINE_TEXT
             base.declined = True
             return base
@@ -638,9 +707,20 @@ class ChatSurface:
                 return base
 
             product = resolution.product if resolution.ok else None
-            if product is None and top.chunk.product_id:
-                # Nothing named in the question — fall back to what retrieval
-                # surfaced.
+            if product is None and top.chunk.product_id and result.decision.entity_matched:
+                # Nothing named in the question, but the question does contain a
+                # term from the catalogue's own vocabulary — so it is about the
+                # catalogue and retrieval's top hit is a fair reading of it.
+                #
+                # The entity match is required, and the requirement is measured.
+                # Without it, "do you sell MRI machines?" reached this line:
+                # no product resolves, but a *Medical Dry Laser Imager* FAQ sits
+                # 0.666 similar, clears the 0.62 threshold, and the buyer is
+                # answered about a device the catalogue does not sell and they
+                # did not ask about. The same question previously declined and
+                # offered a callback, so the wrong answer also silently removed
+                # the lead-capture path — which is how the release gate caught
+                # it.
                 product = self.answers.corpus.get(top.chunk.product_id)
 
             if product is not None:
@@ -667,6 +747,20 @@ class ChatSurface:
                     return base
                 base.text = self.answers.spec_list(product).text
                 base.source_url = product.url or base.source_url
+                return base
+
+            # A catalogue-labelled question that names no catalogue product and
+            # contains no catalogue term is not a catalogue question, whatever
+            # the router called it. Answering it from the nearest chunk is how
+            # "do you sell MRI machines?" was answered with a Medical Dry Laser
+            # Imager FAQ — a device ANITA does not sell, that the buyer did not
+            # ask about.
+            #
+            # Declining also restores the offer of a callback, which is what
+            # makes this a lead rather than a wrong answer.
+            if not result.decision.entity_matched:
+                base.text = self._decline()
+                base.declined = True
                 return base
 
         base.text = top.chunk.text

@@ -37,14 +37,25 @@ TOKEN = "secret-admin-token"
 
 
 class FakeRetriever:
-    """Returns a grounded chunk, or nothing, so both gate outcomes are testable."""
+    """A retriever that models the grounding gate's decision.
+
+    `ok` is the gate's verdict. The default used to return a chunk for *every*
+    query, including "who won the world cup?" — a retriever that claims
+    everything is relevant, which the real gate never does. That was invisible
+    until the surface stopped treating the intent classifier as the authority on
+    relevance and consulted the gate instead (see ChatSurface._answer); then the
+    fake's permissiveness became visible as a passing answer to an off-topic
+    question.
+    """
 
     def __init__(self, ok: bool = True) -> None:
         self.ok = ok
+        self.queries: list[str] = []
 
     def retrieve(self, query):
         from anita.retrieval import Chunk, GateDecision, RetrievalResult, ScoredChunk
 
+        self.queries.append(query)
         if not self.ok:
             return RetrievalResult(
                 decision=GateDecision(False, "below_threshold", 0.2), chunks=[], query=query
@@ -54,8 +65,13 @@ class FakeRetriever:
             product_id="270691", product_name="X-Ray Cassette", chunk_type="product_specs",
             source_url="https://www.anitamedicalsystems.com/x-ray-cassette-270691.html",
         )
+        # `entity_matched=True` because the chunk IS a catalogue chunk and the
+        # query reached it. The surface requires positive evidence that a
+        # question is about the catalogue before answering it from a nearby
+        # chunk; a decision that says "relevant" without saying *why* is not
+        # enough, and a fake that omits the reason cannot exercise that rule.
         return RetrievalResult(
-            decision=GateDecision(True, "similarity", 0.9),
+            decision=GateDecision(True, "entity_match", 0.9, True),
             chunks=[ScoredChunk(chunk=chunk, fused_score=0.5)],
             query=query,
         )
@@ -179,9 +195,22 @@ class TestChatSurface:
         body = chat.post_message(message="is this safe for a pacemaker patient?", session_id="s1").body
         assert body["text"] == CLINICAL_TEXT
 
-    def test_an_off_topic_question_declines(self, chat):
+    def test_an_off_topic_question_declines_when_the_gate_also_refuses(self):
+        """The classifier routes; the gate decides relevance. An off-topic
+        question the gate refuses declines — that is the contract."""
+        chat = ChatSurface(Orchestrator(), retriever=FakeRetriever(ok=False))
         body = chat.post_message(message="who won the world cup?", session_id="s1").body
         assert body["text"] == DECLINE_TEXT
+        assert body["declined"] is True
+
+    def test_a_question_the_gate_admits_is_answered_even_if_the_classifier_said_off_topic(self):
+        """The double-refuser fix. A specification field name matches no
+        classifier pattern, so it was declared off-topic and declined while the
+        gate — whose whole job is this question — was never consulted."""
+        chat = ChatSurface(Orchestrator(), retriever=FakeRetriever(ok=True))
+        body = chat.post_message(message="contrast media compatibility", session_id="s1").body
+        assert body["text"] != DECLINE_TEXT
+        assert body["grounded"] is True
 
     def test_without_retrieval_the_surface_declines_rather_than_improvising(self):
         """No retriever means no grounded answer — so it declines. Wiring a
@@ -445,8 +474,13 @@ class GroundingRetriever:
             chunk_type="product_specs",
             source_url="https://www.anitamedicalsystems.com/xray-intensifying-screen-999999.html",
         )
+        # `entity_matched=True` because the chunk IS a catalogue chunk and the
+        # query reached it. The surface requires positive evidence that a
+        # question is about the catalogue before answering it from a nearby
+        # chunk; a decision that says "relevant" without saying *why* is not
+        # enough, and a fake that omits the reason cannot exercise that rule.
         return RetrievalResult(
-            decision=GateDecision(True, "similarity", 0.9),
+            decision=GateDecision(True, "entity_match", 0.9, True),
             chunks=[ScoredChunk(chunk=chunk, fused_score=0.5)],
             query=query,
         )

@@ -150,12 +150,53 @@ release:
       has no worker, so nothing is ever dialled. Deferred deliberately: placing
       calls to real buyers needs the compliance review of DG-08 to close first.
 
-    UC-10: >-
-      Negative-sentiment escalation. anita.sentiment is complete and tested and
-      referenced by no surface. Deferred until there is an escalation
-      destination — escalating to nobody is worse than not detecting it.
 
     UC-14: >-
       Adding a new messaging channel. This is an extension point rather than a
       trigger, so it is verified by design review and by the channel gateway's
       adapter interface, not by a test that drives it.
+
+# ---------------------------------------------------------------------------
+# Corpus gate (CR-01 US-102, TAC-6).
+#
+# The gate decides whether a corpus belongs to this product before a single
+# vector is written. It is config, not code, so changing the corpus identity
+# needs no rebuild.
+#
+# The source platform's gate hardcoded one product's markers and returned None
+# for any other corpus (rag_legacy.py:89-95, :226-229) — which is why ANITA
+# could not use it at all and why every request to build an index produced
+# nothing. Both lists are required: an empty acceptance list accepts anything,
+# and an empty rejection list rejects nothing.
+#
+# Verified against the real corpus: "anitamedicalsystems" appears in 141/141
+# chunks (in source_url — never in the prose), and none of the blocked markers
+# appears anywhere.
+# ---------------------------------------------------------------------------
+corpus_gate:
+  expected_markers:
+    - anitamedicalsystems
+  blocked_markers:
+    - meridian
+    - university of maryland
+    - terrapin
+    - fafsa
+    - mddcs
+    - mhec
+    - fairleigh dickinson
+    - umd
+    - fdu
+    - admissions
+
+# ---------------------------------------------------------------------------
+# Retrieval backend (CR-01 US-105).
+#
+# shared = the migrated path: shared/rag + Chroma persistence (US-103).
+# memory = the pre-migration path: anita.retrieval.Retriever + InMemoryStore.
+#
+# `memory` is the rollback. It constructs exactly the graph that ran before the
+# migration, so a regression is reversed by configuration rather than by
+# reverting code. ANITA_RAG_BACKEND overrides this for the drill.
+# ---------------------------------------------------------------------------
+rag:
+  backend: shared

@@ -2,6 +2,28 @@
 
 # Plan State — ANITA MEDICAL SYSTEMS Product Marketing & Support Assistant
 
+## Change requests
+
+| CR | Title | Status | Artifacts |
+|---|---|---|---|
+| **CR-01** | Re-architect RAG + Sentiment to the universityDemo pattern, as standalone reusable modules | **PLANNED — ready to build** | `change-requests/CR-01-rag-sentiment-rearchitecture.md` (evidence, Appendices A/B), `CR-01-contract.md` (frozen interface, C1–C10), `CR-01-architecture.md`, `CR-01-modularization-delta.md`, `change-requests/stories/US-101…105`, `US-111…115` |
+
+**CR-01 decisions (user-approved 2026-10-03):** Q7→(a) shared parameterised sentiment core with
+escalation inside it; Q8→(b) adopt the RAG code, lift the corpus gate, retarget vocabulary. The
+external `enterprise-rag-core` service is **out of scope**.
+
+**CR-01 open items at hand-off:** 3 explicit Unknowns (C10.2: UC-10 A1 decline intent,
+`MIN_LABELED_OUTCOMES` tunability, Side A's BANT rule) and 1 plan correction (CV-04: the frozen
+figures below say 169 chunks; reality is 141). Neither blocks starting US-101.
+
+**CR-01 contradiction register — CV-04…CV-12 (CV-01…CV-03 belong to the frozen baseline):**
+
+
+**Build status tracker:** `change-requests/STATUS.md` — per-story status, integration checkpoints C1–C9, and the store-integration matrix. **This is the build checkpoint; update it after every story.**
+
+**Build order:** US-101 → US-102 → US-103 → US-104 → US-105 (adapter last — the only story that
+touches live ANITA behaviour), then US-111 … US-115.
+
 ## Confirmed decisions (user-provided, 2026-10-03)
 
 | # | Decision |
@@ -31,7 +53,7 @@
 
 ## ID registry
 
-AS-01…AS-10 · BRD-01…BRD-23 · UC-01…UC-15 · WF-01…WF-04 · DAT-01…DAT-16 · DG-01…DG-13 · SM-01…SM-06 · CV-01…CV-03 · MOD-01…MOD-10 · REC-01…REC-23 · TRD-01…TRD-48 · US-001…US-030
+AS-01…AS-10 · BRD-01…BRD-23 · UC-01…UC-15 · WF-01…WF-04 · DAT-01…DAT-16 · DG-01…DG-13 · SM-01…SM-06 · CV-01…CV-12 · MOD-01…MOD-10 · REC-01…REC-23 · TRD-01…TRD-48 · US-001…US-030 · US-101…US-105 · US-111…US-115
 
 ## TRD allocation (as built)
 

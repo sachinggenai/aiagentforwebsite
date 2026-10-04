@@ -54,6 +54,8 @@ class Assembly:
     chat: ChatSurface
     admin: AdminSurface
     notes: list[str] = field(default_factory=list)
+    # Set by `assemble`; None when sentiment observation is unavailable.
+    sentiment: Any = None
 
     @property
     def degraded(self) -> bool:
@@ -70,6 +72,21 @@ class Assembly:
         else:
             lines.append("degraded  : no")
         return "\n".join(lines)
+
+
+def _rag_backend(settings: AnitaSettings) -> str:
+    """Which retrieval backend to construct: ``shared`` or ``memory``.
+
+    ``ANITA_RAG_BACKEND`` wins over the config file so the rollback can be
+    exercised without editing a file — the drill is "restart with the variable
+    set", not "change the config and redeploy".
+    """
+    import os
+
+    chosen = (os.environ.get("ANITA_RAG_BACKEND")
+              or getattr(getattr(settings, "rag", None), "backend", "")
+              or "shared").strip().lower()
+    return "memory" if chosen == "memory" else "shared"
 
 
 def _build_retriever(settings: AnitaSettings, chunks: list[Any], notes: list[str]):
@@ -101,8 +118,42 @@ def _build_retriever(settings: AnitaSettings, chunks: list[Any], notes: list[str
     gate = GroundingGate.from_chunks(
         chunks, threshold=settings.retrieval.similarity_threshold
     )
-    return Retriever(chunks, embedder, InMemoryStore(), gate,
-                     top_k=settings.retrieval.top_k, fetch_k=settings.retrieval.fetch_k)
+
+    backend = _rag_backend(settings)
+    if backend == "memory":
+        # The rollback. Constructs exactly the pre-migration graph, so a
+        # regression is reversed by configuration rather than by reverting code.
+        logger.info("retrieval backend: memory (InMemoryStore, pre-migration path)")
+        return Retriever(chunks, embedder, InMemoryStore(), gate,
+                         top_k=settings.retrieval.top_k, fetch_k=settings.retrieval.fetch_k)
+
+    try:
+        from .rag_adapter import build_shared_retriever
+
+        adapter = build_shared_retriever(
+            chunks=chunks,
+            embedder=embedder,
+            gate=gate,
+            corpus_dir=settings.corpus_dir,
+            collection=settings.isolation.chroma_collection,
+            persist_path=Path(settings.isolation.chroma_path),
+            expected_markers=settings.corpus_gate.expected_markers,
+            blocked_markers=settings.corpus_gate.blocked_markers,
+            top_k=settings.retrieval.top_k,
+            fetch_k=settings.retrieval.fetch_k,
+        )
+        logger.info("retrieval backend: shared (shared.rag + Chroma persistence)")
+        return adapter
+    except Exception as exc:  # noqa: BLE001
+        # A shared backend that cannot be constructed must not take retrieval
+        # down: fall back to the known-good path and say so. The alternative is
+        # that a configuration error looks like a broken product.
+        notes.append(
+            f"shared retrieval backend unavailable, using in-memory — "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return Retriever(chunks, embedder, InMemoryStore(), gate,
+                         top_k=settings.retrieval.top_k, fetch_k=settings.retrieval.fetch_k)
 
 
 def _index_available(settings: AnitaSettings) -> bool:
@@ -240,7 +291,35 @@ def assemble(
     except Exception as exc:  # noqa: BLE001
         notes.append(f"lead capture disabled — {type(exc).__name__}: {exc}")
 
-    chat = ChatSurface(orchestrator, answers=answers, retriever=retriever, leads=leads)
+    # -- sentiment + escalation (MOD-07, closing UC-10) --------------------
+    # The core detects a negative turn; the sink turns it into a Handoff against
+    # the same CRM a "request a human" uses, so escalations and callback
+    # requests arrive in one queue rather than two.
+    observer = None
+    try:
+        from shared.sentiment import SentimentConfig, SentimentCore
+
+        from .escalation import EscalationSink, SentimentObserver
+        from .sentiment import anita_sentiment_config
+
+        crm = getattr(leads, "store", None) if leads is not None else None
+        sink = EscalationSink(store=None, crm=crm)
+        observer = SentimentObserver(
+            SentimentCore(anita_sentiment_config(
+                negative_threshold=settings.sentiment.negative_escalation_threshold,
+            )),
+            sink,
+        )
+        if crm is None:
+            notes.append(
+                "escalation has no CRM attached — negatives are recorded but no "
+                "handoff is opened"
+            )
+    except Exception as exc:  # noqa: BLE001
+        notes.append(f"sentiment observation disabled — {type(exc).__name__}: {exc}")
+
+    chat = ChatSurface(orchestrator, answers=answers, retriever=retriever, leads=leads,
+                       sentiment=observer)
 
     admin = AdminSurface(
         registry=registry, gateway=gateway, admission=admission,
@@ -258,7 +337,9 @@ def assemble(
     for note in notes:
         logger.warning("degraded: %s", note)
 
-    return Assembly(settings=settings, router=router, chat=chat, admin=admin, notes=notes)
+    built = Assembly(settings=settings, router=router, chat=chat, admin=admin, notes=notes)
+    built.sentiment = observer
+    return built
 
 
 def _gate_answerer(chat: ChatSurface, retriever):

@@ -144,6 +144,35 @@ class IdentitySettings:
 
 
 @dataclass(frozen=True)
+class CorpusGateSettings:
+    """Which corpus belongs to this product (CR-01 US-102).
+
+    Both lists are required. An empty acceptance list accepts any corpus — the
+    gate becomes a no-op while still looking present — and an empty rejection
+    list rejects nothing. `RagConfig` refuses either at construction; these
+    defaults keep the guard honest even if the config file loses the section.
+    """
+
+    expected_markers: tuple[str, ...] = ("anitamedicalsystems",)
+    blocked_markers: tuple[str, ...] = (
+        "meridian", "university of maryland", "terrapin", "fafsa", "mddcs",
+        "mhec", "fairleigh dickinson", "umd", "fdu", "admissions",
+    )
+
+
+@dataclass(frozen=True)
+class RagSettings:
+    """Which retrieval backend to build.
+
+    `shared` is CR-01's migrated path (shared/rag + Chroma persistence).
+    `memory` is the pre-migration path, kept as the rollback: a regression is
+    reversed by configuration, not by reverting code.
+    """
+
+    backend: str = "shared"
+
+
+@dataclass(frozen=True)
 class ReleaseSettings:
     """What this release does not include, and why.
 
@@ -251,6 +280,8 @@ class AnitaSettings:
     env: Mapping[str, str]
     # Last, because it carries a default and a defaulted field may not precede
     # the ones without. The default is the strict position: nothing deferred.
+    corpus_gate: CorpusGateSettings = CorpusGateSettings()
+    rag: RagSettings = RagSettings()
     release: ReleaseSettings = ReleaseSettings()
 
     # -- convenience ------------------------------------------------------
@@ -328,6 +359,8 @@ def load_settings(
     out_raw = _section(data, "outbound")
     vram_raw = _section(data, "vram")
     release_raw = _section(data, "release")
+    gate_raw = _section(data, "corpus_gate")
+    rag_raw = _section(data, "rag")
 
     isolation = IsolationSettings(
         db_name=_env(environment, "ANITA_DB_NAME", str(iso_raw.get("db_name", DEFAULT_DB_NAME))),
@@ -421,6 +454,15 @@ def load_settings(
                 "OUTBOUND_RETRY_DELAYS_MIN",
                 tuple(int(x) for x in out_raw.get("retry_delays_minutes", OutboundSettings.retry_delays_minutes)),
             ),
+        ),
+        corpus_gate=CorpusGateSettings(
+            expected_markers=tuple(gate_raw.get(
+                "expected_markers", CorpusGateSettings.expected_markers)),
+            blocked_markers=tuple(gate_raw.get(
+                "blocked_markers", CorpusGateSettings.blocked_markers)),
+        ),
+        rag=RagSettings(
+            backend=str(rag_raw.get("backend", RagSettings.backend)),
         ),
         release=ReleaseSettings(
             deferred_use_cases=tuple(

@@ -209,8 +209,6 @@ def check_use_cases(built) -> list[str]:
          "the ticket route is served but there is no audio path to use it"),
         ("UC-09", "Outbound follow-up",
          "OutboundQueue has no worker — leads qualify and nothing dials"),
-        ("UC-10", "Negative sentiment detected",
-         "anita.sentiment is complete and referenced by no surface"),
         ("UC-14", "Add a new messaging channel",
          "an extension point, verified by design review rather than by a trigger"),
     ):
@@ -224,6 +222,31 @@ def check_use_cases(built) -> list[str]:
         else:
             broken.append(uc)
             record(FAIL, f"{uc} {title}", why)
+
+    # UC-10 is driven, not asserted. Removing the deferral from anita.yaml is
+    # not enough on its own: the check has to exercise the capability, or the
+    # use case flips from DEFERRED to FAIL with nothing to show for it.
+    try:
+        observer = getattr(built, "sentiment", None)
+        if observer is None:
+            broken.append("UC-10")
+            record(FAIL, "UC-10 Negative sentiment detected", "no sentiment observer wired")
+        else:
+            before = observer.sink.count() if observer.sink else 0
+            chat.post_message(
+                message="this is unacceptable and I am furious about the delivery",
+                session_id="uc-10",
+            )
+            after = observer.sink.count() if observer.sink else 0
+            ok = after > before
+            record(PASS if ok else FAIL, "UC-10 Negative sentiment detected",
+                   f"escalation recorded (score {observer.status()['sink']['last']['score']:+.2f})"
+                   if ok else "a clearly negative turn raised no escalation")
+            if not ok:
+                broken.append("UC-10")
+    except Exception as exc:  # noqa: BLE001
+        broken.append("UC-10")
+        record(FAIL, "UC-10 Negative sentiment detected", f"{type(exc).__name__}: {exc}")
 
     # UC-12 / UC-13 / UC-15 are operator surfaces, not chat turns.
     try:

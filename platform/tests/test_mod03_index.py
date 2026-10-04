@@ -342,6 +342,58 @@ class TestBuildIndex:
         assert build.state is IndexState.LIVE
         assert build.chunks == len(chunks)
 
+    def test_the_embed_targets_the_collection_the_build_names(self):
+        """US-010: a rebuild must write into the fresh staging collection it
+        names, not the collection that is live while it runs.
+
+        The defect only bit from the second rebuild onward — the first build's
+        name coincides with the configured collection — which is why it looked
+        correct in the fifth-pass evidence. This test fails on both rebuilds if
+        the embed goes through the live retriever."""
+        from anita.index import build_index
+
+        chunks = self._chunks()
+        embedded: list[str] = []
+
+        class RecordingRetriever:
+            """Stands in for a retriever that can address a collection."""
+
+            def __init__(self, inner, collection):
+                self.inner = inner
+                self.collection = collection
+                self.store = inner.store
+
+            def for_collection(self, name):
+                return RecordingRetriever(self.inner, name)
+
+            def build_index(self):
+                embedded.append(self.collection)
+                return self.inner.build_index()
+
+        life = IndexLifecycle("anita_ams__v1")
+        live = RecordingRetriever(self._retriever(chunks), "anita_ams__v1")
+
+        first = build_index(life, chunks, retriever=live)
+        second = build_index(life, chunks, retriever=live)
+
+        assert [first.collection, second.collection] == ["anita_ams__v1", "anita_ams__v2"]
+        assert embedded == ["anita_ams__v1", "anita_ams__v2"], (
+            "each build must embed into its own staging collection; embedding "
+            "into the live one is the defect this pins"
+        )
+        assert live.collection == "anita_ams__v1", "the serving retriever is not retargeted"
+
+    def test_a_retriever_that_cannot_retarget_is_used_as_is(self):
+        """The in-memory backend has no collections to version: a retriever
+        without `for_collection` must keep working exactly as before."""
+        from anita.index import build_index
+
+        chunks = self._chunks()
+        life = IndexLifecycle("anita_ams__v1")
+        build = build_index(life, chunks, retriever=self._retriever(chunks))
+        assert build.state is IndexState.LIVE
+        assert build.chunks == len(chunks)
+
     def test_failed_gate_blocks_promotion(self):
         from anita.index import build_index
 

@@ -830,14 +830,17 @@ class TestUS027RebuildEntryPoint:
         assert callable(module.main)
         assert callable(module._gate_validator)
 
-    def test_the_validator_returns_the_report_dict(self):
+    def _module(self):
         import importlib.util
-        from types import SimpleNamespace
 
         path = PLATFORM / "scripts" / "rebuild_index.py"
         spec = importlib.util.spec_from_file_location("rebuild_index", path)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+        return module
+
+    def test_the_validator_returns_the_report_dict(self):
+        from types import SimpleNamespace
 
         class FakeGate:
             set_sha256 = "x"
@@ -845,8 +848,78 @@ class TestUS027RebuildEntryPoint:
             def evaluate(self, answerer):
                 return SimpleNamespace(as_dict=lambda: {"passed": True, "reason": "ok"})
 
-        validator = module._gate_validator(chat=None, gate=FakeGate())
-        assert validator(object()) == {"passed": True, "reason": "ok"}
+        class FakeChat:
+            retriever = object()
+
+        validator = self._module()._gate_validator(
+            chat=FakeChat(), gate=FakeGate(), retriever=object()
+        )
+        assert validator(SimpleNamespace(collection="anita_ams__v2")) == {
+            "passed": True, "reason": "ok"
+        }
+
+    def test_the_validator_scores_the_staging_collection_and_restores_the_surface(self):
+        """US-010: the frozen set must be answered from the collection the build
+        *names*, not the one that is live while the rebuild runs — and the
+        surface must be put back afterwards, including when the gate raises, so
+        a rejected build cannot leave the process answering from a collection
+        that was never promoted."""
+        from types import SimpleNamespace
+
+        asked: list[str] = []
+
+        class FakeRetriever:
+            def __init__(self, collection):
+                self.collection = collection
+
+            def for_collection(self, name):
+                return FakeRetriever(name)
+
+        class FakeChat:
+            def __init__(self, retriever):
+                self._retriever = retriever
+
+            @property
+            def retriever(self):
+                return self._retriever
+
+            @retriever.setter
+            def retriever(self, value):
+                self._retriever = value
+
+            def post_message(self, *, message, session_id):
+                asked.append(self._retriever.collection)
+                return SimpleNamespace(body={"text": "ok"})
+
+        class FakeGate:
+            set_sha256 = "x"
+
+            def evaluate(self, answerer):
+                for i in range(2):
+                    answerer(SimpleNamespace(question=f"q{i}", case_id=str(i)))
+                return SimpleNamespace(as_dict=lambda: {"passed": True, "reason": "ok"})
+
+        module = self._module()
+        live = FakeRetriever("anita_ams__v1")
+        chat = FakeChat(live)
+        validator = module._gate_validator(chat=chat, gate=FakeGate(), retriever=live)
+
+        validator(SimpleNamespace(collection="anita_ams__v2"))
+
+        assert asked == ["anita_ams__v2", "anita_ams__v2"], (
+            "the gate must query the staging collection, not the live one"
+        )
+        assert chat.retriever is live, "the serving retriever must be restored"
+
+        class ExplodingGate(FakeGate):
+            def evaluate(self, answerer):
+                raise RuntimeError("gate blew up")
+
+        with pytest.raises(RuntimeError):
+            module._gate_validator(chat=chat, gate=ExplodingGate(), retriever=live)(
+                SimpleNamespace(collection="anita_ams__v3")
+            )
+        assert chat.retriever is live, "restore must happen on the failure path too"
 
 
 # ---------------------------------------------------------------------------

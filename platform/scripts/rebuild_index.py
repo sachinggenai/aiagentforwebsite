@@ -10,6 +10,12 @@ The sequence this drives, in order:
 
     begin → embed → validate against the frozen set → promote, or reject
 
+Both the embed and the validation target the collection the build **names**, not
+the one that is live while the rebuild runs: `index.staging_retriever()` binds
+the write to the new collection, and the gate is answered through a retriever
+bound to the same one. Before that, a second rebuild validated the previous
+index and promoted a collection nothing had written (`work-status.md` §8.23).
+
 A rejection leaves the previously live index serving: a refresh that goes wrong
 is a no-op rather than an outage (`SM-05`). The validation report carries the
 frozen set's SHA-256, so a promoted build can be tied to the exact question set
@@ -37,19 +43,32 @@ for stream in (sys.stdout, sys.stderr):
         pass
 
 from anita.assembly import assemble, deployed_environment  # noqa: E402
-from anita.index import IndexLifecycle, build_index  # noqa: E402
+from anita.index import IndexLifecycle, build_index, staging_retriever  # noqa: E402
 from anita.retrieval import load_chunks  # noqa: E402
 
 
-def _gate_validator(chat, gate):
-    """The frozen set, run against the assembled answer engine."""
+def _gate_validator(chat, gate, retriever):
+    """The frozen set, run against the build that is about to be promoted.
 
-    def validate(_build) -> dict:
-        report = gate.evaluate(
-            lambda case: chat.post_message(
-                message=case.question, session_id=f"gate-{case.case_id}"
-            ).body.get("text", "")
-        )
+    US-010: the gate must score the **staging** collection. The answer path
+    reads through `chat.retriever`, so for each build the surface is pointed at
+    a sibling bound to `build.collection` and restored afterwards — on failure
+    too, so a rejected build cannot leave this process answering from a
+    collection that was never promoted.
+    """
+
+    def validate(build) -> dict:
+        staging = staging_retriever(retriever, build.collection)
+        previous = chat.retriever
+        chat.retriever = staging
+        try:
+            report = gate.evaluate(
+                lambda case: chat.post_message(
+                    message=case.question, session_id=f"gate-{case.case_id}"
+                ).body.get("text", "")
+            )
+        finally:
+            chat.retriever = previous
         return report.as_dict()
 
     return validate
@@ -109,13 +128,13 @@ def main(argv: list[str] | None = None) -> int:
         lifecycle,
         chunks,
         retriever=retriever,
-        validate=_gate_validator(chat, gate),
+        validate=_gate_validator(chat, gate, retriever),
     )
 
     state = build.state.value
     print(f"build    : {build.build_id} → {state}")
     if state == "live":
-        print(f"promoted : {build.collection}")
+        print(f"promoted : {build.collection}  ({build.chunks} vectors embedded and validated)")
         print(f"pointer  : {store_path}")
         return 0
     print(f"rejected : {build.error or build.state.value}")

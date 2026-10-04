@@ -109,6 +109,41 @@ class TestDuckTypeCompatibility:
 
 
 # ---------------------------------------------------------------------------
+# US-010 — the staging collection
+# ---------------------------------------------------------------------------
+@requires_corpus
+class TestStagingCollection:
+    """A rebuild embeds into, and validates against, the collection it is about
+    to promote. Before `for_collection` existed, the rebuild embedded through
+    the live retriever: from the second rebuild onward the frozen set scored the
+    previous index and the promoted collection was populated later, unvalidated."""
+
+    def test_for_collection_binds_a_sibling_and_shares_the_rest(self, tmp_path):
+        adapter = make_adapter(tmp_path)
+        staging = adapter.for_collection("anita_ams__v2")
+
+        assert staging is not adapter
+        assert staging.collection == "anita_ams__v2"
+        assert adapter.collection == "anita_ams__v1", "the live retriever is untouched"
+        assert staging.gate is adapter.gate
+        assert staging.embedder is adapter.embedder
+        assert len(staging.chunks) == len(adapter.chunks)
+
+    def test_a_staging_build_does_not_write_the_live_collection(self, tmp_path):
+        """The crispest statement of the fix: after embedding a staging build,
+        the live collection is still empty."""
+        adapter = make_adapter(tmp_path)
+        staging = adapter.for_collection("anita_ams__v2")
+
+        assert staging.build_index() == len(adapter.chunks)
+
+        assert staging.store.count() == len(adapter.chunks)
+        assert adapter.store.count() == 0, (
+            "a staging build must not write into the collection that is live"
+        )
+
+
+# ---------------------------------------------------------------------------
 # The gate is retained and still governs
 # ---------------------------------------------------------------------------
 @requires_corpus

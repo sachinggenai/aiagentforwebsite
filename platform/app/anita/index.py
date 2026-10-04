@@ -35,7 +35,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Protocol, Sequence
+from typing import Any, Callable, Protocol, Sequence
 
 from .retrieval import Chunk
 
@@ -540,6 +540,19 @@ class IndexLifecycle:
         return build
 
 
+def staging_retriever(retriever: Any, collection: str) -> Any:
+    """The retriever to embed (and validate) a build with — bound to the
+    collection the build *names*, not the one that is live while it runs.
+
+    A retriever that can address a collection exposes ``for_collection(name)``
+    and gets a sibling bound to ``collection``. One that cannot — the in-memory
+    backend, a test double — is returned unchanged: it has no collections to
+    version, so there is nothing to retarget.
+    """
+    factory = getattr(retriever, "for_collection", None)
+    return factory(collection) if callable(factory) else retriever
+
+
 def build_index(
     lifecycle: IndexLifecycle,
     chunks: Sequence[Chunk],
@@ -554,6 +567,14 @@ def build_index(
     Every failure path ends in :meth:`IndexLifecycle.reject`, which leaves the
     previously live index serving. A refresh that goes wrong is therefore a
     no-op rather than an outage.
+
+    The embed targets ``build.collection`` — the fresh collection the lifecycle
+    named at :meth:`IndexLifecycle.begin` — via :func:`staging_retriever`. Until
+    2026-10-04 it embedded through the *live* retriever instead, so from the
+    second rebuild onward the frozen set scored the previous index and the
+    promoted collection was populated later, unvalidated (`TAC-3`, `SM-05`).
+    Callers that validate must therefore run the gate against the same staging
+    retriever — :func:`staging_retriever` is exported for exactly that.
     """
     try:
         assert_corpus_is_anita(chunks)
@@ -562,10 +583,11 @@ def build_index(
         return lifecycle.reject(str(exc))
 
     build = lifecycle.begin(embed_model=embed_model, dimensions=dimensions)
+    staging = staging_retriever(retriever, build.collection)
 
     try:
-        retriever.build_index()
-        indexed = retriever.store.count()
+        staging.build_index()
+        indexed = staging.store.count()
     except Exception as exc:  # noqa: BLE001 - any failure leaves the old index live
         return lifecycle.reject(f"embedding failed: {type(exc).__name__}: {exc}")
 

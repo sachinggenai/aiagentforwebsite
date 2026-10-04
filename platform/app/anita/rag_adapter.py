@@ -92,6 +92,40 @@ class SharedRagRetriever:
             logger.warning("could not build the vector index (%s); "
                            "retrieval will be sparse-only", exc)
 
+    @property
+    def collection(self) -> str:
+        """The collection this retriever reads and writes."""
+        return str(getattr(self.service.config, "collection_name", ""))
+
+    def for_collection(self, collection: str) -> "SharedRagRetriever":
+        """A sibling bound to another collection, sharing everything else.
+
+        US-010: a rebuild must embed into — and validate against — the *staging*
+        collection it is about to promote, not the collection that is live while
+        it runs. Retargeting this object would be a lie: `RagService` caches the
+        vector store it opens, and the serving process is using it. A sibling
+        over a `RagConfig` whose `collection_name` is the staging name is the
+        only honest way to point the write somewhere else.
+
+        The chunks, embedder, gate and fusion policy are shared by reference —
+        only the collection differs, so a staging retriever cannot accidentally
+        answer from a different corpus or with a different threshold.
+        """
+        from dataclasses import replace
+
+        from shared.rag import RagService
+
+        config = replace(self.service.config, collection_name=collection)
+        service = RagService(config, embedder=self.embedder)
+        return SharedRagRetriever(
+            service,
+            chunks=self.chunks,
+            embedder=self.embedder,
+            gate=self.gate,
+            top_k=self.top_k,
+            fetch_k=self.fetch_k,
+        )
+
     # -- indexing ----------------------------------------------------------
     def build_index(self, *, batch_size: int = 32) -> int:
         """Embed and persist. Returns the number of vectors written.

@@ -383,6 +383,7 @@ def assemble(
         admin_token=settings.env.get("ANITA_ADMIN_TOKEN", ""),
         gate_answerer=_gate_answerer(chat, retriever),
         voice=voice,
+        voice_sessions=_voice_session_factory(),
     )
 
     for note in notes:
@@ -394,6 +395,25 @@ def assemble(
     )
     built.sentiment = observer
     return built
+
+
+def _voice_session_factory():
+    """One engine session per call.
+
+    A factory, not an instance: `VoiceCallSession` holds the audio buffer, the
+    VAD counter and the history of a *single* call. Sharing one between calls
+    would put two callers' audio through one end-of-speech decision and produce
+    a transcript that is neither of theirs.
+    """
+    from .voice import VoiceCallSession
+
+    def make(_call_id: str = "") -> VoiceCallSession:
+        # `call_id` is assigned by the media-stream relay from Twilio's `start`
+        # event, which arrives after the socket opens — so the factory cannot
+        # take it, and does not need to.
+        return VoiceCallSession(direction="inbound")
+
+    return make
 
 
 def _gate_answerer(chat: ChatSurface, retriever):

@@ -409,11 +409,16 @@ class Router:
     cannot be added without one by forgetting a decorator. The table decides.
     """
 
-    def __init__(self, *, admin_token: str = "", voice=None) -> None:
+    def __init__(self, *, admin_token: str = "", voice=None, voice_sessions=None) -> None:
         self.admin_token = admin_token
         self._handlers: dict[Route, Callable[..., Response]] = {}
         self._lock = threading.Lock()
         self.calls: list[dict] = []
+        # Builds the engine session for one call. A factory rather than an
+        # instance: a `VoiceCallSession` carries the audio buffer, the VAD
+        # counter and the conversation history of a single call, so sharing one
+        # across calls would mix two callers' audio into one transcript.
+        self.voice_sessions = voice_sessions
         # The Twilio ingress (US-001). It is not a `Route`: those are JSON
         # endpoints dispatched through `dispatch`, while a Twilio webhook takes
         # a form-encoded body and answers in TwiML. It rides on the router
@@ -473,7 +478,7 @@ class Router:
 
 def build_router(*, chat: ChatSurface, mic: BrowserMicSurface, admin: AdminSurface,
                  admin_token: str = "", gate_answerer: Callable[[Any], str] | None = None,
-                 voice=None) -> Router:
+                 voice=None, voice_sessions=None) -> Router:
     """Wire the three surfaces into one router.
 
     ``gate_answerer`` is bound **here, on the server**, and never taken from the
@@ -482,7 +487,7 @@ def build_router(*, chat: ChatSurface, mic: BrowserMicSurface, admin: AdminSurfa
     could return "ok" for every case and force a pass, which is precisely the
     failure the gate exists to prevent.
     """
-    router = Router(admin_token=admin_token, voice=voice)
+    router = Router(admin_token=admin_token, voice=voice, voice_sessions=voice_sessions)
     router.register(Route.HEALTH, lambda: Response(200, {"status": "ok"}))
     router.register(Route.CHAT_MESSAGE, chat.post_message)
     router.register(Route.CHAT_HISTORY, chat.get_history)

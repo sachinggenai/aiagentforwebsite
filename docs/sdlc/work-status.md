@@ -287,17 +287,51 @@ Now wired in `config.py::_environment`, with three properties, each tested:
 **Verified:** a full preflight now reports **one** degradation — `TUNNEL_HOST unset` — down from two.
 `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER` (`+12792365960`) and `ANITA_ADMIN_TOKEN` all load.
 
+### The media-stream relay (`media_stream.py`, 2026-10-04)
+
+`WS /twilio/media-stream` is registered and the relay is built. **This is new code, not a port** —
+the source's media loop lived in `app/main.py`, which REC-10 dropped by design, and `voice.py`'s
+docstring refers to a `handle_media` that was never written.
+
+The relay holds **no decision of its own**. End-of-speech belongs to `feed_audio`; the barge-in
+verdict belongs to `admit_inbound_frame` (which already calls `request_interruption()` itself); the
+answer belongs to the installed answer engine. `media_stream.py` moves bytes and keeps the protocol
+honest — putting a second decision point beside the engine's is exactly the defect US-014 exists to
+remove.
+
+| Behaviour | How it is proven (27 tests) |
+|---|---|
+| `start` captures streamSid / call_id / caller; the engine is given `call_id` | over the socket and directly |
+| A duplicate `start` does not restart the conversation | UC-03 duplicate row |
+| Payloads are base64-decoded to 160-byte µ-law frames | asserted byte-for-byte |
+| End-of-speech sends the answer back as base64 `media` | over the real ASGI socket |
+| Streamed audio is **not sent twice** | `process_utterance` returns the same frames it streamed; re-sending would speak every clause twice |
+| `mark` every 25 frames (~500 ms), not before | flow control |
+| Barge-in frames go to the gate; `FRAME_ECHO`/`FRAME_MUTED` are **not** fed | the assistant must not answer its own voice |
+| `clear` is sent so interrupted audio stops playing out of Twilio's buffer | without it, a working barge-in sounds broken |
+| `stop`, and an **abnormal drop**, both release the admission slot | AC-8 / SM-04 — a leaked slot makes the box refuse calls while idle |
+| `close` is idempotent and never releases another call's slot | |
+| No audio is sent after close; late frames are ignored | frames in flight during teardown |
+| The call id is masked in logs | TAC-8 / REC-14 |
+
+Two defects were found **by these tests**, not by review: `_on_media` fed frames arriving after
+teardown, and a close could have released a slot twice. One test bug of my own was also corrected —
+it admitted two calls into a controller whose ceiling was 1.
+
 ### Still to build for US-001
 
-1. **`WS /twilio/media-stream` and the frame relay** — the largest remaining piece. The engine's
-   docstring names `handle_media`, which **does not exist**; the source's media loop lived in
-   `app/main.py`, which REC-10 dropped by design. No WebSocket route exists anywhere in the app.
+1. **The STT leg cannot be exercised yet.** Everything either side of it is proven — the relay
+   protocol, the answer path, and Kokoro TTS (RTF 0.60) — but **µ-law → Whisper cannot run while
+   Smart App Control blocks `import av`**. Until that is off (B3 above) the full audio round trip
+   is untested, and a real call would fail at transcription.
 2. **Schema** — `channel_endpoint`, `inbound_event`, `channel_session`.
 3. **Public ingress** — a Cloudflare tunnel, which is also what clears the remaining `TUNNEL_HOST`
    degradation. Quick tunnels change hostname on every restart, so Twilio's webhook must be
    re-pointed each time; the source had a `scripts/update_twilio_webhook.py` for this, which is
    **not** in this repo.
-4. **Verification** — `T-01…T-17`, then a real call to `+12792365960`.
+4. **Not yet implemented from the story:** the 30-minute call cap (`TAC-6`) and the three-strike
+   unintelligible-utterance path (`AC-7`).
+5. **Verification** — `T-01…T-17`, then a real call to `+12792365960`.
 
 ---
 

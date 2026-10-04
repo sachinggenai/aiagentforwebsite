@@ -27,7 +27,7 @@ import logging
 from pathlib import Path
 from typing import Any, Callable
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi import Response as RawResponse
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
@@ -163,6 +163,36 @@ def create_app(router: Router, *, title: str = "ANITA MEDICAL SYSTEMS") -> FastA
         @app.post("/twilio/status", include_in_schema=False)
         async def twilio_status(request: Request) -> Any:
             return await _handle_twilio(request, "status")
+
+        if router.voice_sessions is not None:
+
+            @app.websocket("/twilio/media-stream")
+            async def twilio_media_stream(websocket: WebSocket) -> None:
+                """The audio door (US-001, `WS /twilio/media-stream`).
+
+                The relay does the protocol; this function owns only the
+                socket's lifetime. Every exit path closes the relay, because a
+                stream that ends without releasing its slot erodes the
+                admission ceiling silently — the box goes on refusing calls
+                while sitting idle (`AC-8`, `SM-04`).
+                """
+                from .media_stream import TwilioMediaStream
+
+                await websocket.accept()
+                relay = TwilioMediaStream(
+                    session=router.voice_sessions(""),
+                    send=websocket.send_json,
+                    admission=router.voice.admission,
+                )
+                try:
+                    while True:
+                        await relay.handle_message(await websocket.receive_text())
+                except WebSocketDisconnect:
+                    # A caller who hangs up, or a dropped socket. Not an error.
+                    await relay.close(reason="disconnect")
+                except Exception:  # noqa: BLE001 - teardown must not depend on the cause
+                    logger.exception("media stream: relay failed, tearing the call down")
+                    await relay.close(reason="error")
 
     @app.get("/", include_in_schema=False)
     async def chat_page() -> Any:

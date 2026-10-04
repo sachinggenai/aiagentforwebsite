@@ -134,6 +134,13 @@ class TwilioMediaStream:
 
         # The engine keys its trace and its conversation on this.
         self.session.call_id = self.call_id
+        # US-004: the caller's number from the carrier. Read here and, until
+        # this change, dropped — so the voice path could not recognise a buyer
+        # who had already spoken to the web chat (`BRD-02`).
+        if hasattr(self.session, "caller"):
+            self.session.caller = self.caller
+        if hasattr(self.session, "channel_kind"):
+            self.session.channel_kind = "voice_inbound"
 
         # The session row is keyed on the stream SID, not the phone number: a
         # caller who withholds their number has no other stable identity for
@@ -180,14 +187,31 @@ class TwilioMediaStream:
             # The agent is talking. Whether this frame is the caller
             # interrupting is the engine's decision, not the relay's — the echo
             # gate has to compare it against what is currently playing out.
-            from .voice import FRAME_ECHO, FRAME_MUTED
+            from .voice import FRAME_ECHO, FRAME_INTERRUPTION, FRAME_MUTED
 
             verdict = self.session.admit_inbound_frame(frame)
             if verdict in (FRAME_ECHO, FRAME_MUTED):
                 return
-            # `admit_inbound_frame` has already asked the running turn to stop
-            # (`request_interruption`); the frame is ordinary caller audio from
-            # here and belongs to the one end-of-speech decision.
+            # US-017: on the *transition* into an interruption — and only then.
+            # Once admitted, the engine returns to LISTENING, so the caller's
+            # continuing speech arrives as FRAME_LISTENING and must not
+            # re-signal: one barge-in, one `clear`, one truncation mark.
+            if verdict == FRAME_INTERRUPTION:
+                # The engine stopping is only half a barge-in. Twilio is still
+                # holding audio it has buffered but not played, so without this
+                # the interrupted answer keeps talking out of the carrier's
+                # buffer — which sounds exactly like the interruption failed.
+                await self.clear_playout()
+                # And the transcript must record that the answer was cut short;
+                # a model that believes it delivered an answer the caller never
+                # finished hearing will refuse to repeat it. No-op on the
+                # streamed path, where the history already holds only what was
+                # spoken.
+                note = getattr(self.session, "note_answer_truncated", None)
+                if note is not None:
+                    note()
+            # The frame is ordinary caller audio from here and belongs to the
+            # one end-of-speech decision.
         elif self._turn is not None and not self._turn.done():
             return
 
@@ -216,6 +240,7 @@ class TwilioMediaStream:
     async def _run_turn(self) -> None:
         self._speaking = True
         self._streamed = False
+        outcome = "answered"
         try:
             chunks, transcript, end_call = await self.session.process_utterance(
                 chunk_sink=self._sink
@@ -236,12 +261,19 @@ class TwilioMediaStream:
         except asyncio.CancelledError:
             # A barge-in. The caller is mid-sentence; the audio already sent is
             # what they heard, and the partial transcript is kept.
+            outcome = "interrupted"
             logger.info("media stream: turn cancelled by caller interruption")
             raise
         except Exception:
+            outcome = "failed"
             logger.exception("media stream: turn failed")
         finally:
             self._speaking = False
+            # US-025: emit the turn's trace however it ended. `getattr` because
+            # tests drive this relay with a fake session that has no engine.
+            finish = getattr(self.session, "finish_trace", None)
+            if finish is not None:
+                finish(outcome=outcome)
 
     async def _sink(self, frames: list[bytes]) -> None:
         """The engine's streaming sink — clause audio, as it is produced."""
@@ -300,6 +332,13 @@ class TwilioMediaStream:
 
         if self.admission is not None and self.call_id:
             self.admission.release(self.call_id)
+
+        # US-006 TAC-5: the call's conversation gets its summary at teardown.
+        # Not closed — a buyer who calls and then messages should continue one
+        # thread; the idle sweep owns closing.
+        from .voice_pipeline import finish_call
+
+        finish_call(self.call_id, reason=f"voice_{reason}")
 
         # Closing is idempotent on both sides: a call can end by Twilio `stop`,
         # by socket drop, or by both, and the row must reflect the first.

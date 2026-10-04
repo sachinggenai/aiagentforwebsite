@@ -11,8 +11,10 @@ Run:  .venv\\Scripts\\python -m pytest tests -q
 from __future__ import annotations
 
 import ast
+import json
 import re
 import sys
+import warnings
 from pathlib import Path
 
 import pytest
@@ -22,8 +24,40 @@ sys.path.insert(0, str(PLATFORM / "app"))
 
 ANITA = PLATFORM / "app" / "anita"
 
+#: Vendored evidence for the faithful-copy check (CL-11). Written by
+#: `scripts/voice_manifest.py`; read here so the check never depends on the
+#: sibling repository being on the machine. Under `fixtures/`, not `data/`:
+#: `data/` is gitignored as a runtime artefact and this file is source.
+MANIFEST_PATH = (
+    Path(__file__).resolve().parent / "fixtures" / "voice_engine_manifest.json"
+)
+
+_DEFINITION_RE = re.compile(r"\s*(def |class |async def )")
+
+
+def _definitions(text: str) -> list[str]:
+    """The source's function/class signatures, one per line, stripped."""
+    return [line.strip() for line in text.splitlines() if _DEFINITION_RE.match(line)]
+
+
+def _manifest() -> dict:
+    return json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+
 
 class TestMigrationIntegrity:
+    def test_the_manifest_is_present(self):
+        """CL-11: the faithful-copy evidence is vendored, and required.
+
+        This check used to read the sibling repo directly and `pytest.skip`
+        when it was absent — and a skip reads like a pass, so on a clean
+        checkout the engine was unguarded. A missing or empty manifest is now
+        a failure, not a skip.
+        """
+        manifest = _manifest()
+        assert manifest["source_definitions"], "the manifest carries no definitions"
+        assert len(manifest["source_sha256"]) == 64, "no usable source hash"
+        assert manifest["source_line_count"] > 1000, "suspiciously small source"
+
     def test_the_engine_is_a_faithful_copy(self):
         """The turn loop must not have been edited in transit — a rewritten
         engine would lose the barge-in and echo-gate tuning that was derived
@@ -33,34 +67,36 @@ class TestMigrationIntegrity:
         divergences US-001 requires, listed below. Anything else still fails,
         which is the property this test exists for: a deliberate, traceable
         change and an accidental rewrite must not look the same.
+
+        Checked against the vendored manifest (CL-11), so the property holds
+        with or without the sibling repository present. When the sibling *is*
+        here and has moved on, a warning says the manifest is stale — the
+        sibling is a different product and is free to evolve.
         """
-        source = Path("D:/project/universityDemo/app/voice_handler.py")
-        if not source.exists():
-            pytest.skip("source repo not available")
+        manifest = _manifest()
+        source_defs = manifest["source_definitions"]
         copied = (ANITA / "voice.py").read_text(encoding="utf-8")
-        original = source.read_text(encoding="utf-8")
 
-        # Compare the *definitions*, not byte equality: prose legitimately
-        # names the source module, and the import lines were retargeted.
-        def definitions(text: str) -> list[str]:
-            return [
-                line.strip() for line in text.splitlines()
-                if re.match(r"\s*(def |class |async def )", line)
-            ]
-
-        copied_defs = definitions(copied)
-        source_defs = definitions(original)
+        copied_defs = _definitions(copied)
 
         # AC-7 makes the third rung terminal, so `_noise_reply` now reports
         # whether the call should end. TAC-6 adds the call ceiling. Both are
-        # requirements the source predates.
-        DELIBERATE_GONE = {"def _noise_reply(self) -> str:"}
+        # requirements the source predates. CL-8 removes the source's
+        # `generate_ulaw_greeting`: ANITA greets through TwiML `<Say>` and
+        # nothing in this repo ever called the helper (`work-status.md` §10).
+        DELIBERATE_GONE = {
+            "def _noise_reply(self) -> str:",
+            "def generate_ulaw_greeting(text: str) -> list[bytes]:",
+        }
         DELIBERATE_NEW = {
             "def _noise_reply(self) -> tuple[str, bool]:",
             "def call_seconds(self) -> float:",
             "def call_expired(self) -> bool:",
             "def mark_capped(self) -> None:",
             "def _max_call_seconds() -> int:",
+            # US-025: emits the turn's trace when the turn resolves, whatever
+            # the outcome. The source had tracing hooks but no emit path.
+            "def finish_trace(self, *, outcome: str = \"answered\") -> None:",
         }
 
         missing = set(source_defs) - DELIBERATE_GONE - set(copied_defs)
@@ -78,6 +114,21 @@ class TestMigrationIntegrity:
         # And the tuning constants must survive verbatim.
         for constant in ("BARGE_IN_ABS_FLOOR =", "BARGE_IN_ECHO_GAIN =", "VAD_SILENCE_MS ="):
             assert constant in copied
+
+        # CL-11 freshness probe: the manifest is the authority for this test;
+        # the live source only tells us whether the manifest needs regenerating.
+        live_source = Path(manifest["source_path"])
+        if live_source.exists():
+            live_defs = _definitions(live_source.read_text(encoding="utf-8"))
+            if live_defs != source_defs:
+                warnings.warn(
+                    "the sibling voice engine has changed since the manifest was "
+                    "generated — the copy is still checked against the manifest, "
+                    "but review the diff and regenerate with "
+                    "`python scripts/voice_manifest.py`",
+                    UserWarning,
+                    stacklevel=1,
+                )
 
     def test_no_sibling_import_remains(self):
         """Every lazy import must point at an ANITA adapter."""
@@ -160,7 +211,11 @@ class TestAdapters:
         from anita.speech import AdmissionController
 
         assert isinstance(voice_admission.REGISTRY, AdmissionController)
-        assert voice_admission.REGISTRY.max_concurrent_calls == 2
+        # The registry is process-wide, and `assembly` installs the *assembled*
+        # controller into it — which US-018 caps on a host without a GPU. So the
+        # default is asserted on a fresh instance rather than on whatever the
+        # last assembly in this session left behind.
+        assert AdmissionController().max_concurrent_calls == 2
 
     def test_the_admission_adapter_offers_no_bundled_audio(self):
         """ANITA ships no pre-synthesised WAV, so the caller must fall back to
@@ -243,7 +298,13 @@ class TestAdapters:
 
         original = voice_pipeline._ANSWER
         try:
-            voice_pipeline._ANSWER = lambda q, *, session_key: "First clause. Second clause."
+            # Accepts the seam's current kwargs (`caller`, `channel_kind` —
+            # US-004): the point of this guard is that the streaming path
+            # *calls* the installed answer, not the exact arity it uses.
+            voice_pipeline._ANSWER = (
+                lambda q, *, session_key, caller="", channel_kind="":
+                "First clause. Second clause."
+            )
             pieces = asyncio.run(_collect_stream(voice_rag.query_rag_stream("q", retrieval_query="q")))
         finally:
             voice_pipeline._ANSWER = original
@@ -521,3 +582,524 @@ class TestTAC6CallCeiling:
         session = self._session(ceiling=1800)
         chunks, dialogue, end_call = asyncio.run(session.process_utterance())
         assert (chunks, dialogue, end_call) == ([], "", False)
+
+
+# ---------------------------------------------------------------------------
+# The engine's vocabulary is ANITA's — work-status.md §10, CL-1 / CL-2
+# ---------------------------------------------------------------------------
+
+CORPUS_DIR = PLATFORM.parent / "data" / "out"
+
+#: Vocabulary belonging to the sibling product this engine was copied from.
+#: These terms are legitimate *elsewhere* — the isolation guards and the
+#: corpus gate list them deliberately, so a copy-pasted sibling config is
+#: refused at boot — which is why this guard is scoped to the engine's own
+#: strings, not the whole tree (CL-10 is the tree-wide net).
+SIBLING_TERMS = (
+    "meridian", "university", "admissions", "tuition", "mba", "ielts",
+    "toefl", "gmat", "campus", "semester", "student", "enrollment",
+)
+
+
+class TestTheEngineSpeaksAnitasVocabulary:
+    """CL-1 / CL-2: the copied engine must speak and correct in ANITA's language.
+
+    Both defects this pins were live on every call. The closing line — spoken
+    on any polite hang-up — named the sibling product's admissions office, and
+    every transcript was run through that product's corrections table
+    (`emma`→`MBA`, `intuition`→`tuition`).
+    """
+
+    def test_the_closing_line_names_anita(self):
+        from anita import voice
+
+        line = voice.CLOSING_REPLY.lower()
+        assert "anita" in line
+        assert not [t for t in SIBLING_TERMS if t in line], (
+            "the closing line names the sibling product again"
+        )
+
+    def test_a_sign_off_speaks_the_anita_closing_line(self):
+        """Driven through `process_utterance` — the real decision path.
+
+        STT and TTS are stubbed: what is under test is which line the closing
+        branch chooses, not the models.
+        """
+        import asyncio
+
+        import numpy as np
+
+        from anita import voice
+
+        session = voice.VoiceCallSession()
+        # Enough non-silent audio to clear the min-burst floor. Staged
+        # directly — how the buffer filled is not what this test is about.
+        session._audio_buffer = [b"\xff" * 160] * voice.MIN_UTTERANCE_FRAMES
+        session._total_frames = voice.MIN_UTTERANCE_FRAMES
+
+        async def fake_transcribe(audio):
+            return "bye", False
+
+        async def fake_synthesise(text):
+            # What Kokoro returns: float32 PCM at 24 kHz, so the shape matters
+            # even in a stub (`_pcm_to_ulaw_chunks` resamples and chunks it).
+            return np.zeros(24000, dtype=np.float32)
+
+        session._transcribe = fake_transcribe
+        session._synthesise = fake_synthesise
+
+        chunks, dialogue, end_call = asyncio.run(session.process_utterance())
+
+        assert end_call is True, "a sign-off ends the call"
+        assert voice.CLOSING_REPLY in dialogue
+        assert chunks, "the caller hears the line"
+        assert not [t for t in SIBLING_TERMS if t in dialogue.lower()]
+
+    def test_no_correction_carries_sibling_vocabulary(self):
+        from anita import voice
+
+        table = " ".join(
+            f"{wrong} {right}"
+            for wrong, right in voice.VoiceCallSession._CORRECTIONS.items()
+        ).lower()
+        assert not [t for t in SIBLING_TERMS if t in table], (
+            "a sibling product's vocabulary is back in the corrections table"
+        )
+
+    def test_every_correction_target_is_catalogue_vocabulary(self):
+        """The invariant that keeps CL-2 from rotting.
+
+        Every target must exist in ANITA's own corpus — product names, brands,
+        company name. An edit that pastes in another product's words fails
+        here, which is exactly how the previous table should have been caught.
+        """
+        from anita import voice
+        from anita.config import load_settings
+        from anita.corpus import Corpus
+
+        vocabulary: set[str] = set()
+        for product in Corpus(CORPUS_DIR).all_products():
+            vocabulary.add(product.name)
+            if product.brand:
+                vocabulary.add(product.brand)
+        vocabulary.add(load_settings(env={}).identity.company_name)
+        blob = " | ".join(vocabulary).lower()
+
+        missing = [
+            target
+            for target in voice.VoiceCallSession._CORRECTIONS.values()
+            if target.lower() not in blob
+        ]
+        assert not missing, (
+            f"correction targets are not ANITA catalogue vocabulary: {missing}"
+        )
+
+    def test_a_mis_heard_product_name_is_corrected(self):
+        from anita import voice
+
+        session = voice.VoiceCallSession()
+        corrected = session._post_process_transcript(
+            "how much is the ultra sound gel and the ex ray cassette"
+        )
+        assert "Ultrasound" in corrected
+        assert "X-Ray" in corrected
+        assert "ultra sound" not in corrected.lower()
+
+    def test_a_correction_does_not_fire_inside_a_longer_word(self):
+        """Word boundaries. The previous implementation substituted on
+        substrings, so a key rewrote any longer word containing it."""
+        from anita import voice
+
+        session = voice.VoiceCallSession()
+        assert session._post_process_transcript("annitas") == "annitas"
+
+
+class TestClarificationAndScrubbingSpeakAnitasVocabulary:
+    """CL-3 / CL-4: the loop-breaker's detector and the meta-leak scrubber.
+
+    The clarification pattern decided when the assistant was stuck asking
+    admissions questions ("which program?", "fall or spring?") and the scrubber
+    dropped sentences containing "university profile". Neither vocabulary
+    belongs to this product.
+    """
+
+    #: Phrasings the loop-breaker must count — an assistant turn that asks the
+    #: caller to pin down a product or an order.
+    ANITA_CLARIFICATIONS = (
+        "Which specific product are you asking about?",
+        "Which one do you mean?",
+        "Could you specify the model?",
+        "Did you mean the APO 100 or the APO 200?",
+        "What quantity do you need?",
+        "Just to confirm, are you looking for the cassette or the film?",
+    )
+
+    #: Admissions phrasings the detector must no longer recognise. They avoid
+    #: the domain-neutral lead-ins ("did you mean", "could you specify"), which
+    #: are deliberately kept — what changed is the domain vocabulary.
+    ADMISSIONS_PHRASINGS = (
+        "Which intake are you applying for?",
+        "What programs does the university offer?",
+        "Is the fall semester still open?",
+        "Do you offer a course in radiology?",
+        "When does the new term start?",
+    )
+
+    def test_an_anita_clarification_reads_as_one(self):
+        from anita import voice
+
+        missed = [q for q in self.ANITA_CLARIFICATIONS if not voice._is_clarification(q)]
+        assert not missed, f"clarification questions the loop-breaker would miss: {missed}"
+
+    def test_admissions_phrasing_no_longer_reads_as_a_clarification(self):
+        from anita import voice
+
+        false = [q for q in self.ADMISSIONS_PHRASINGS if voice._is_clarification(q)]
+        assert not false, f"admissions phrasings still counted as clarifications: {false}"
+
+    def test_the_clarification_pattern_carries_no_admissions_vocabulary(self):
+        from anita import voice
+
+        pattern = voice._CLARIFICATION_RE.pattern.lower()
+        admissions = ("program", "course", "intake", "semester", "term", "fall")
+        found = [word for word in admissions if word in pattern]
+        assert not found, f"admissions vocabulary is back in the pattern: {found}"
+
+    def test_the_scrubber_strips_the_meta_prefix_and_keeps_the_answer(self):
+        from anita import voice
+
+        scrubbed = voice.scrub_meta_leak(
+            "Here's the relevant information from the catalogue profile: "
+            "Ultrasound Gel is listed at ₹60/Piece."
+        )
+        assert scrubbed == "Ultrasound Gel is listed at ₹60/Piece", (
+            "the meta lead-in must be stripped while the real content survives"
+        )
+
+    def test_the_scrubber_drops_a_pure_meta_sentence(self):
+        from anita import voice
+
+        assert voice.scrub_meta_leak("Based on the catalogue, I will answer.") is None
+
+    def test_clean_text_passes_through_byte_identical(self):
+        from anita import voice
+
+        clean = "Ultrasound Gel is listed at ₹60/Piece."
+        assert voice.scrub_meta_leak(clean) is clean
+
+    def test_the_scrubber_carries_no_sibling_vocabulary(self):
+        from anita import voice
+
+        blob = (" ".join(voice._META_MARKERS) + " " + voice._PREFIX_STRIP.pattern).lower()
+        assert not [t for t in SIBLING_TERMS if t in blob], (
+            "a sibling product's vocabulary is back in the scrubber"
+        )
+
+
+class TestTheVoicePromptNamesTheCatalogue:
+    """CL-5: the prompt builder assembled an admissions prompt on every turn.
+
+    It is inert today only because `voice_pipeline.run_rag_query_sync` answers
+    the *question*, not the prompt — US-014 wires the prose leg, at which point
+    every one of these sentences reaches a model.
+    """
+
+    def _session_with(self, turns):
+        from anita import voice
+
+        session = voice.VoiceCallSession()
+        session._conversation_history = list(turns)
+        return session
+
+    def test_the_prompt_names_the_catalogue(self):
+        session = self._session_with(
+            ["Caller: hello", "Assistant: Hello! How can I help?"]
+        )
+        prompt = session._build_llm_prompt("how much is the ultrasound gel")
+        assert "catalogue" in prompt.lower()
+        assert "ultrasound gel" in prompt.lower()
+        assert not [t for t in SIBLING_TERMS if t in prompt.lower()]
+
+    def test_the_loop_breaker_prompt_names_the_catalogue(self):
+        """Two clarification turns in a row is the branch that rebuilds the
+        prompt with caller-only history — the one US-014 will drive hardest."""
+        session = self._session_with(
+            [
+                "Caller: I need a gel",
+                "Assistant: Which specific product do you mean?",
+                "Caller: the gel",
+                "Assistant: Could you specify the model?",
+            ]
+        )
+        prompt = session._build_llm_prompt("the gel")
+        assert "Do NOT ask any question" in prompt
+        assert "catalogue" in prompt.lower()
+        assert not [t for t in SIBLING_TERMS if t in prompt.lower()]
+
+
+class TestTheEngineLogsUnderItsOwnName:
+    """CL-6: the engine logged as `voice_handler` — the source module's name."""
+
+    def test_the_loggers_are_named_under_anita(self):
+        from anita import voice
+
+        assert voice.logger.name == "anita.voice"
+        assert voice.voice_events.name == "anita.voice.events"
+
+    def test_no_logger_is_named_after_the_source_module(self):
+        source = (ANITA / "voice.py").read_text(encoding="utf-8")
+        assert 'getLogger("voice_handler")' not in source
+        assert 'getLogger("voice_events")' not in source
+
+
+# ---------------------------------------------------------------------------
+# US-017 — immediate barge-in stop
+# ---------------------------------------------------------------------------
+class TestUS017BargeInStopsTheAnswer:
+    """An interruption stops the *remaining* clauses, not just the current one.
+
+    The audit reproduced the defect: interrupting during clause 1 still
+    synthesised and sent all four — the cancel flag was read only before the
+    first clause and after the last, so barge-in stopped the sentence the
+    caller had already heard and nothing else.
+    """
+
+    CLAUSES = ("First clause.", "Second clause.", "Third clause.")
+
+    def _session(self):
+        from anita import voice
+
+        return voice.VoiceCallSession()
+
+    def _stub_stream(self, monkeypatch, clauses=None):
+        from anita import voice_rag
+
+        async def fake_stream(prompt, cancel=None, retrieval_query=None,
+                              session_key="", **kwargs):
+            for clause in (clauses or self.CLAUSES):
+                yield clause
+
+        monkeypatch.setattr(voice_rag, "query_rag_stream", fake_stream)
+
+    def _stub_tts(self, session, spoken, interrupt_after=None):
+        async def fake_synthesise_streamed(text, sink):
+            spoken.append(text)
+            frames = [b"\xff" * 160]
+            if sink is not None:
+                await sink(frames)
+            if interrupt_after is not None and len(spoken) >= interrupt_after:
+                session.request_interruption()
+            return frames
+
+        session._synthesise_streamed = fake_synthesise_streamed
+
+    def test_an_interruption_stops_the_remaining_clauses(self, monkeypatch):
+        import asyncio
+
+        self._stub_stream(monkeypatch)
+        session = self._session()
+        session.begin_turn()
+        spoken: list[str] = []
+        self._stub_tts(session, spoken, interrupt_after=1)
+
+        async def sink(frames):
+            pass
+
+        answer, _chunks = asyncio.run(
+            session._query_llm_streamed("how much is the gel", sink, cancel=session._cancel)
+        )
+
+        assert spoken == ["First clause."], (
+            f"the caller interrupted after clause 1 but heard {spoken}"
+        )
+        assert answer == "First clause.", (
+            "the history must hold only what was actually spoken"
+        )
+
+    def test_an_uninterrupted_stream_speaks_every_clause(self, monkeypatch):
+        import asyncio
+
+        self._stub_stream(monkeypatch)
+        session = self._session()
+        session.begin_turn()
+        spoken: list[str] = []
+        self._stub_tts(session, spoken, interrupt_after=None)
+
+        async def sink(frames):
+            pass
+
+        answer, _chunks = asyncio.run(
+            session._query_llm_streamed("how much is the gel", sink, cancel=session._cancel)
+        )
+
+        assert spoken == list(self.CLAUSES)
+        assert answer == " ".join(self.CLAUSES)
+
+    def test_synthesis_stops_mid_clause(self):
+        """The caller cuts in while a clause is still being synthesised: the
+        remaining audio of that clause is not sent either."""
+        import asyncio
+
+        import numpy as np
+
+        session = self._session()
+        session.begin_turn()
+
+        async def fake_stream(text, *, voice=None, speed=None):
+            for _ in range(3):
+                yield np.zeros(2400, dtype=np.float32), 24000
+
+        session.synthesise_stream = fake_stream
+        sent: list[list[bytes]] = []
+
+        async def sink(frames):
+            sent.append(frames)
+            session.request_interruption()
+
+        chunks = asyncio.run(session._synthesise_streamed("A long clause.", sink))
+
+        assert len(sent) == 1, f"kept sending audio after the interruption: {len(sent)} batches"
+        assert chunks == sent[0]
+
+    def test_no_interruption_is_unchanged(self):
+        """The guard: with no cancel, the synthesis loop sends everything."""
+        import asyncio
+
+        import numpy as np
+
+        session = self._session()
+        session.begin_turn()
+
+        async def fake_stream(text, *, voice=None, speed=None):
+            for _ in range(3):
+                yield np.zeros(2400, dtype=np.float32), 24000
+
+        session.synthesise_stream = fake_stream
+        sent: list[list[bytes]] = []
+
+        async def sink(frames):
+            sent.append(frames)
+
+        chunks = asyncio.run(session._synthesise_streamed("A long clause.", sink))
+        assert len(sent) == 3
+        assert chunks is not None and len(chunks) == sum(len(batch) for batch in sent)
+
+    def test_a_failed_clause_is_retried_once_then_offers_a_human(self):
+        """AC-4: one retry, then the human-transfer offer — never silence."""
+        import asyncio
+
+        session = self._session()
+        session.begin_turn()
+        calls: list[str] = []
+
+        async def always_fails(text, sink):
+            calls.append(text)
+            return None
+
+        session._synthesise_streamed = always_fails
+
+        async def fake_stream(prompt, cancel=None, retrieval_query=None,
+                              session_key="", **kwargs):
+            yield "First clause."
+
+        import anita.voice_rag as voice_rag
+        original = voice_rag.query_rag_stream
+        voice_rag.query_rag_stream = fake_stream
+        try:
+            async def sink(frames):
+                pass
+
+            answer, chunks = asyncio.run(
+                session._query_llm_streamed("a question", sink, cancel=session._cancel)
+            )
+        finally:
+            voice_rag.query_rag_stream = original
+
+        from anita import voice as voice_module
+
+        assert calls == ["First clause.", "First clause.", voice_module.HUMAN_TRANSFER_REPLY], calls
+        assert chunks == [], "no audio could be produced, but the offer was attempted"
+
+    def test_a_clause_that_fails_once_recovers_on_the_retry(self):
+        import asyncio
+
+        session = self._session()
+        session.begin_turn()
+        attempts: list[int] = []
+
+        async def fails_then_works(text, sink):
+            attempts.append(1)
+            if len(attempts) == 1:
+                return None
+            frames = [b"\xff" * 160]
+            if sink is not None:
+                await sink(frames)
+            return frames
+
+        session._synthesise_streamed = fails_then_works
+
+        async def fake_stream(prompt, cancel=None, retrieval_query=None,
+                              session_key="", **kwargs):
+            yield "First clause."
+
+        import anita.voice_rag as voice_rag
+        original = voice_rag.query_rag_stream
+        voice_rag.query_rag_stream = fake_stream
+        try:
+            async def sink(frames):
+                pass
+
+            answer, chunks = asyncio.run(
+                session._query_llm_streamed("a question", sink, cancel=session._cancel)
+            )
+        finally:
+            voice_rag.query_rag_stream = original
+
+        assert len(attempts) == 2, "one failure, one retry"
+        assert chunks, "the retry's audio is kept"
+
+
+class TestUS017TruncationMarker:
+    """AC-2: the transcript records that the answer was cut short — on the
+    batch path only, where the history holds the full composed answer."""
+
+    def test_the_batch_path_marks_the_answer(self):
+        from anita import voice
+
+        session = voice.VoiceCallSession()
+        session._spoke_streamed = False
+        session._conversation_history = ["Caller: hello", "Assistant: The price is 60."]
+
+        session.note_answer_truncated()
+
+        assert session._conversation_history[-1].endswith(voice.TRUNCATION_MARK)
+
+    def test_marking_is_idempotent(self):
+        from anita import voice
+
+        session = voice.VoiceCallSession()
+        session._conversation_history = ["Assistant: The price is 60."]
+        session.note_answer_truncated()
+        once = session._conversation_history[-1]
+        session.note_answer_truncated()
+        assert session._conversation_history[-1] == once
+
+    def test_the_streamed_path_is_not_marked(self):
+        """The streamed history already holds only what the caller heard."""
+        from anita import voice
+
+        session = voice.VoiceCallSession()
+        session._spoke_streamed = True
+        session._conversation_history = ["Assistant: The price is 60."]
+
+        session.note_answer_truncated()
+
+        assert not session._conversation_history[-1].endswith(voice.TRUNCATION_MARK)
+
+    def test_a_non_answer_entry_is_untouched(self):
+        from anita import voice
+
+        session = voice.VoiceCallSession()
+        session._conversation_history = ["Caller: hello"]
+        session.note_answer_truncated()
+        assert session._conversation_history[-1] == "Caller: hello"

@@ -65,9 +65,9 @@ CASES: tuple[tuple[str, str, tuple[str, ...], str], ...] = (
 
 def trace_all(live_url: str | None) -> int:
     from anita import orchestrator as orch
-    from anita.assembly import assemble
+    from anita.assembly import assemble, deployed_environment
 
-    built = assemble(require_preflight=False)
+    built = assemble(require_preflight=False, env=deployed_environment())
     chat = built.chat
     if chat.retriever is not None:
         try:

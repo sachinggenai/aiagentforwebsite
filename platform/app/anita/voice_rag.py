@@ -27,6 +27,8 @@ async def query_rag_stream(
     cancel: "asyncio.Event | None" = None,
     retrieval_query: str | None = None,
     session_key: str = "",
+    caller: str = "",
+    channel_kind: str = "voice_inbound",
     **kwargs,
 ) -> AsyncIterator[str]:
     """Yield the answer, clause by clause.
@@ -35,6 +37,10 @@ async def query_rag_stream(
     event, and the caller's actual utterance as `retrieval_query`. The
     utterance — not the prompt — is what is answered, for the same `C3/N1`
     reason the batch path records.
+
+    `caller` and `channel_kind` are forwarded, not consumed: the streaming
+    path must reach the same conversation as the batch path, or a caller's
+    turns would land in two threads depending on which path answered.
     """
     from .llm import ClauseCutter
     from .voice_pipeline import run_rag_query_sync
@@ -44,7 +50,8 @@ async def query_rag_stream(
     # The engine is synchronous and does retrieval plus SQL; run it off the
     # event loop so the media stream keeps flowing while it works.
     answer = await asyncio.to_thread(
-        run_rag_query_sync, prompt, "voice", question, session_key
+        run_rag_query_sync, prompt, "voice", question, session_key,
+        caller=caller, channel_kind=channel_kind,
     )
 
     if cancel is not None and cancel.is_set():

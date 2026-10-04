@@ -117,8 +117,20 @@ class TestParseExtraction:
 
     def test_prompt_carries_the_product_taxonomy(self):
         """REC-05: the taxonomy is the re-target from admissions to product
-        enquiries."""
-        prompt = build_extraction_prompt("is it expensive?")
+        enquiries.
+
+        Checked against the prompt ANITA actually serves (`ANITA_EXTRACTION_PROMPT`
+        through `anita_sentiment_config`), not the shared package's fallback:
+        that one deliberately names no industry and no objection vocabulary
+        (`work-status.md` §10, CL-9). This test previously passed against the
+        fallback, which is the wrong string to pin a product taxonomy to.
+        """
+        from anita.sentiment import anita_sentiment_config
+
+        prompt = build_extraction_prompt(
+            "is it expensive?",
+            prompt=anita_sentiment_config().extraction_prompt,
+        )
         assert "ready" in prompt
         assert "frustrated" in prompt
         assert "minimum_order" in prompt

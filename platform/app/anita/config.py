@@ -194,6 +194,13 @@ class ReleaseSettings:
     # direction that cannot silently ship an unfinished feature.
     deferred_use_cases: tuple[tuple[str, str], ...] = ()
 
+    #: US-027 / TAC-1: the frozen evaluation set — a versioned repo file, never
+    #: a database table — and the SHA-256 it must match. Empty hash means
+    #: unpinned (development only); a *mismatch* disables the release gate
+    #: rather than running a set someone edited without re-pinning it.
+    eval_set: str = "eval/anita_frozen_set.jsonl"
+    eval_set_sha256: str = ""
+
 
 @dataclass(frozen=True)
 class CorpusSettings:
@@ -268,6 +275,51 @@ class VramSettings:
 
 
 @dataclass(frozen=True)
+class ExtraChannelSettings:
+    """The configurable extra messaging channel (US-002, `DG-07`).
+
+    The secret itself is never here — `secret_env` names the environment key
+    that holds it, the same shape every other credential in this platform
+    uses (`REC-21`). An adapter declared but not enabled is a configuration
+    waiting to be switched on; `enabled: false` is the shipped default.
+    """
+
+    enabled: bool = False
+    id: str = ""
+    provider: str = ""
+    address: str = ""
+    secret_env: str = ""
+    capabilities: tuple[str, ...] = ("text",)
+    inbound: bool = True
+    outbound: bool = True
+
+
+@dataclass(frozen=True)
+class ChannelSettings:
+    extra: ExtraChannelSettings = ExtraChannelSettings()
+
+
+@dataclass(frozen=True)
+class ConversationSettings:
+    """US-004/US-006: the conversation lifecycle, from configuration.
+
+    The idle window is read, never hard-coded — the story's DoD says so, and
+    the reason is operational: whether a call at 09:00 joins last night's chat
+    is a business decision someone must be able to change without a code
+    change.
+    """
+
+    idle_window_hours: float = 6.0
+    queue_depth: int = 20
+    replay_capacity: int = 1000
+    context_turns: int = 6
+    #: Retention is MOD-06's policy (`DG-11`); the store exposes the hook and
+    #: `expire_transcript` is what a retention job calls. Recorded here so the
+    #: number lives with the operator's settings rather than in a cron file.
+    retention_days: int = 90
+
+
+@dataclass(frozen=True)
 class AnitaSettings:
     """Immutable, validated configuration for one ANITA instance."""
 
@@ -288,6 +340,8 @@ class AnitaSettings:
     corpus_gate: CorpusGateSettings = CorpusGateSettings()
     rag: RagSettings = RagSettings()
     release: ReleaseSettings = ReleaseSettings()
+    channels: ChannelSettings = ChannelSettings()
+    conversation: ConversationSettings = ConversationSettings()
 
     # -- convenience ------------------------------------------------------
     @property
@@ -301,6 +355,12 @@ class AnitaSettings:
     @property
     def corpus_dir(self) -> Path:
         return (self.project_root / self.corpus.out_dir).resolve()
+
+    @property
+    def eval_set_path(self) -> Path:
+        """The frozen evaluation set (US-027). Resolved like the corpus: from
+        the project root, never from the process working directory."""
+        return (self.project_root / self.release.eval_set).resolve()
 
     def env_presence(self) -> dict[str, str]:
         """Key -> ``set``/``unset`` for every configured environment key.
@@ -411,6 +471,11 @@ def load_settings(
     release_raw = _section(data, "release")
     gate_raw = _section(data, "corpus_gate")
     rag_raw = _section(data, "rag")
+    channels_raw = _section(data, "channels")
+    extra_raw = channels_raw.get("extra") or {}
+    if not isinstance(extra_raw, Mapping):
+        raise ConfigError("channels.extra", "expected a mapping in the config file")
+    conv_raw = _section(data, "conversation")
 
     isolation = IsolationSettings(
         db_name=_env(environment, "ANITA_DB_NAME", str(iso_raw.get("db_name", DEFAULT_DB_NAME))),
@@ -515,11 +580,56 @@ def load_settings(
         rag=RagSettings(
             backend=str(rag_raw.get("backend", RagSettings.backend)),
         ),
+        channels=ChannelSettings(
+            extra=ExtraChannelSettings(
+                enabled=_env_bool(
+                    environment, "ANITA_EXTRA_CHANNEL_ENABLED",
+                    bool(extra_raw.get("enabled", ExtraChannelSettings.enabled)),
+                ),
+                id=_env(environment, "ANITA_EXTRA_CHANNEL_ID",
+                        str(extra_raw.get("id", ExtraChannelSettings.id))),
+                provider=_env(environment, "ANITA_EXTRA_CHANNEL_PROVIDER",
+                              str(extra_raw.get("provider", ExtraChannelSettings.provider))),
+                address=_env(environment, "ANITA_EXTRA_CHANNEL_ADDRESS",
+                             str(extra_raw.get("address", ExtraChannelSettings.address))),
+                secret_env=str(extra_raw.get("secret_env", ExtraChannelSettings.secret_env)),
+                capabilities=tuple(
+                    str(capability) for capability in extra_raw.get(
+                        "capabilities", ExtraChannelSettings.capabilities)
+                ),
+                inbound=bool(extra_raw.get("inbound", ExtraChannelSettings.inbound)),
+                outbound=bool(extra_raw.get("outbound", ExtraChannelSettings.outbound)),
+            ),
+        ),
+        conversation=ConversationSettings(
+            idle_window_hours=_env_float(
+                environment, "CONVERSATION_IDLE_WINDOW_HOURS",
+                float(conv_raw.get("idle_window_hours", ConversationSettings.idle_window_hours)),
+            ),
+            queue_depth=_env_int(
+                environment, "CONVERSATION_QUEUE_DEPTH",
+                int(conv_raw.get("queue_depth", ConversationSettings.queue_depth)),
+            ),
+            replay_capacity=_env_int(
+                environment, "CONVERSATION_REPLAY_CAPACITY",
+                int(conv_raw.get("replay_capacity", ConversationSettings.replay_capacity)),
+            ),
+            context_turns=_env_int(
+                environment, "CONVERSATION_CONTEXT_TURNS",
+                int(conv_raw.get("context_turns", ConversationSettings.context_turns)),
+            ),
+            retention_days=_env_int(
+                environment, "CONVERSATION_RETENTION_DAYS",
+                int(conv_raw.get("retention_days", ConversationSettings.retention_days)),
+            ),
+        ),
         release=ReleaseSettings(
             deferred_use_cases=tuple(
                 (str(uc), str(reason))
                 for uc, reason in (release_raw.get("deferred_use_cases") or {}).items()
             ),
+            eval_set=str(release_raw.get("eval_set", ReleaseSettings.eval_set)),
+            eval_set_sha256=str(release_raw.get("eval_set_sha256", "")).strip(),
         ),
         vram=VramSettings(
             shared_card_mib=_env_int(environment, "VRAM_SHARED_CARD_MIB", int(vram_raw.get("shared_card_mib", VramSettings.shared_card_mib))),

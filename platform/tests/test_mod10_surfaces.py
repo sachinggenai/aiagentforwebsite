@@ -271,20 +271,42 @@ class TestChatHistory:
 # ---------------------------------------------------------------------------
 class TestBrowserMic:
     def test_a_ticket_is_issued_when_admitted(self):
-        mic = BrowserMicSurface(AdmissionController(max_concurrent_calls=1))
+        """US-003: the ticket is a signed token the voice socket can verify."""
+        from anita.browser_voice import SessionTokens
+
+        tokens = SessionTokens("test-secret", ttl_seconds=60)
+        mic = BrowserMicSurface(AdmissionController(max_concurrent_calls=1), tokens=tokens)
         response = mic.post_ticket(session_id="s1")
         assert response.status == 200
         assert response.body["ticket"]
+        # Verifiable, and it names this session — not an opaque UUID.
+        assert tokens.verify(response.body["ticket"]).session_id == "s1"
 
     def test_a_refusal_explains_what_to_do(self):
         """A refusal is a designed outcome, delivered with the next step."""
+        from anita.browser_voice import SessionTokens
+
         admission = AdmissionController(max_concurrent_calls=1)
-        mic = BrowserMicSurface(admission)
-        mic.post_ticket(session_id="s1")
+        # A ticket *forecasts* (peek) and does not take the slot, so capacity
+        # is exhausted the way a real call exhausts it.
+        admission.admit("call-1")
+        mic = BrowserMicSurface(admission, tokens=SessionTokens("test-secret"))
         response = mic.post_ticket(session_id="s2")
         assert response.status == 503
         assert response.body["admitted"] is False
         assert "call you back" in response.body["message"]
+
+    def test_a_ticket_does_not_reserve_capacity(self):
+        """The reason for `peek`: a buyer who denies the microphone permission
+        after minting a ticket must not consume a voice slot until the socket
+        actually opens."""
+        from anita.browser_voice import SessionTokens
+
+        admission = AdmissionController(max_concurrent_calls=1)
+        mic = BrowserMicSurface(admission, tokens=SessionTokens("test-secret"))
+        assert mic.post_ticket(session_id="s1").status == 200
+        assert admission.active_calls() == 0
+        assert admission.admit("call-1").admitted
 
     def test_voice_is_refused_when_degraded(self):
         admission = AdmissionController()
@@ -619,6 +641,17 @@ class TestConsentAndLeadCapture:
         body = chat.post_message(message="my number is 98200 11122", session_id="s1").body
         assert "passed your details" in body["text"]
         assert service.store.find_lead(phone="+919820011122") is not None
+
+    def test_the_captured_lead_is_written_onto_the_conversation(self, with_leads):
+        """US-004: the orchestrator links the identity from here, so the phone
+        the buyer *supplied* is what a later call from that number resolves
+        through (`AC-1`). The engine's contract is on the conversation object;
+        this asserts the real capture path writes it, not only the test stub."""
+        chat, _ = with_leads
+        chat.post_message(message="call me on 98200 11122", session_id="s1")
+        conversation = chat.orchestrator.registry.get("s1")
+        assert conversation.lead_id
+        assert conversation.lead_phone == "+919820011122"
 
     def test_the_lead_carries_the_product_asked_about(self, with_leads):
         """A lead with no product interest is a name and a number; one that

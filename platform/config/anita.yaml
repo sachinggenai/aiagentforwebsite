@@ -96,6 +96,31 @@ sentiment:
   ewma_lambda: 0.35
   negative_escalation_threshold: -0.20
 
+# The configurable extra messaging channel (US-002, DG-07). Switching a new
+# channel on is a config change plus its secret in the environment - never a
+# code change (D1). `enabled: false` is the shipped default: declaration is
+# free, listening is not.
+channels:
+  extra:
+    enabled: false
+    id: ""                    # e.g. "acme_portal" — the id in the webhook path
+    provider: ""              # e.g. "acme" — names the failing provider on refusal
+    address: ""               # the handle inbound messages carry
+    secret_env: "ANITA_EXTRA_CHANNEL_SECRET"   # env key holding the HMAC secret
+    capabilities: ["text"]    # text | media_in | media_out | audio | streaming
+    inbound: true
+    outbound: true
+
+# US-004 / US-006 — the conversation lifecycle. The idle window is read from
+# here, never hard-coded: whether a 09:00 call joins last night's chat is a
+# business decision, not a constant.
+conversation:
+  idle_window_hours: 6        # AC-4: beyond this, a new child conversation opens
+  queue_depth: 20             # turns waiting behind one in flight before a re-prompt
+  replay_capacity: 1000       # buffered turns while the store is unavailable
+  context_turns: 6            # prior turns carried in as context
+  retention_days: 90          # MOD-06's policy; the store exposes the hook
+
 outbound:
   max_attempts: 3
   window_start: "10:00"
@@ -130,34 +155,32 @@ vram:
 release:
   deferred_use_cases:
 
-    UC-02: >-
-      WhatsApp inbound. The adapter is registered in the channel gateway but no
-      webhook route is served, so an inbound message has nowhere to land.
-      Deferred until the text and lead product is validated with real buyers
-      over web chat.
-
-    UC-03: >-
-      Inbound voice call. There is no voice route in the API at all, and the
-      engine has never carried a call — no carrier, no media stream, no
-      barge-in under load. Deferred until a Twilio number is provisioned and a
-      real call can be taken, because local STT/TTS round trips do not validate
-      the path.
-
-    UC-04: >-
-      Browser-mic question. The admission ticket route is served, but there is
-      no audio path behind it: a ticket is issued and nothing consumes the
-      audio. Deferred with UC-03 — the same media path serves both.
+    # UC-02 (WhatsApp), UC-03 (inbound voice), UC-04 (browser mic) and UC-14
+    # (adding a channel) were deferred here with reasons that US-001, US-002 and
+    # US-003 made false: the WhatsApp webhook is served and driven, the voice
+    # webhook admits and hands out a media stream, the browser-mic socket
+    # carries audio, and the extra channel is a config change. They are removed
+    # rather than left as a stale excuse — a deferral that no longer describes
+    # the product is the same drift as a status that no longer describes the
+    # code. `system_check` now drives each of them; what remains for UC-03 is a
+    # real-carrier call, tracked as US-001's own residual in work-status §3a,
+    # not a capability this release omits.
 
     UC-09: >-
       Outbound follow-up. Leads are captured and qualified; the OutboundQueue
       has no worker, so nothing is ever dialled. Deferred deliberately: placing
       calls to real buyers needs the compliance review of DG-08 to close first.
 
-
-    UC-14: >-
-      Adding a new messaging channel. This is an extension point rather than a
-      trigger, so it is verified by design review and by the channel gateway's
-      adapter interface, not by a test that drives it.
+  # US-027 / TAC-1 — the frozen evaluation set.
+  #
+  # The set is a versioned repo file, never a database table, and this hash is
+  # what "frozen" means in practice: boot verifies it, and a set edited without
+  # re-pinning disables the gate (which makes the release gate refuse
+  # promotion, rather than scoring a set nobody reviewed).
+  #
+  # Regenerate deliberately:  python scripts/freeze_eval_set.py --write
+  eval_set: eval/anita_frozen_set.jsonl
+  eval_set_sha256: "eb2ffc27c88cf18ed872d042b2f93b6fdae20efe3f7911dfd820a2e9173164dd"
 
 # ---------------------------------------------------------------------------
 # Corpus gate (CR-01 US-102, TAC-6).

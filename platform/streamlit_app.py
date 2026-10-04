@@ -51,7 +51,7 @@ def startup() -> dict:
     collection with a sibling product must not start, and that check is the
     reason the boot sequence exists.
     """
-    from anita.assembly import assemble
+    from anita.assembly import assemble, deployed_environment
     from anita.boot import preflight, render_report
 
     report = preflight()
@@ -68,7 +68,7 @@ def startup() -> dict:
         note = ("Preflight passed except SECRETS (ANITA_ADMIN_TOKEN unset). "
                 "This process serves the buyer chat only and uses no admin route.")
 
-    built = assemble(require_preflight=False)
+    built = assemble(require_preflight=False, env=deployed_environment())
 
     indexed = 0
     if built.chat.retriever is not None:

@@ -394,7 +394,7 @@ class TestBootPreflight:
     def test_preflight_reports_every_phase(self):
         report = preflight(env=self._env(), project_root=PLATFORM)
         assert [p.name for p in report.phases] == [
-            "LOAD", "AUDIT", "ISOLATION", "SECRETS", "PLATFORM", "DATA", "WARM",
+            "LOAD", "AUDIT", "ISOLATION", "SECRETS", "PLATFORM", "DATA", "INDEX", "WARM",
         ]
 
     def test_preflight_is_side_effect_free(self):

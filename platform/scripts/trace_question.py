@@ -52,13 +52,13 @@ def clip(value, n: int = 96) -> str:
 
 
 def trace(question: str, live_url: str | None) -> int:
-    from anita.assembly import assemble
+    from anita.assembly import assemble, deployed_environment
 
     print("=" * 100)
     print(f"TRACE: {question!r}")
     print("=" * 100)
 
-    built = assemble(require_preflight=False)
+    built = assemble(require_preflight=False, env=deployed_environment())
     chat = built.chat
 
     # -- hop 1: the surface -------------------------------------------------

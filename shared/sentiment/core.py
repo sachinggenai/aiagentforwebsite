@@ -22,7 +22,11 @@ no `os.environ`, holds no import-time settings, and names no product.
 
 from __future__ import annotations
 
-from .config import DEFAULT_NEGATIVE_THRESHOLD, SentimentConfig
+from .config import (
+    DEFAULT_NEGATIVE_THRESHOLD,
+    GENERIC_EXTRACTION_PROMPT,
+    SentimentConfig,
+)
 
 import json
 import logging
@@ -32,7 +36,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Protocol
 
-logger = logging.getLogger("anita.sentiment")
+logger = logging.getLogger("shared.sentiment")
 
 
 class Emotion(str, Enum):
@@ -100,38 +104,16 @@ class Extraction:
 # ---------------------------------------------------------------------------
 # The extraction prompt — the taxonomy is the re-target
 # ---------------------------------------------------------------------------
-EXTRACTION_PROMPT = _GENERIC_FALLBACK = """You are analysing a buyer's message to a supplier
-supplier. Return ONLY a JSON object, no prose.
-
-Buyers are hospitals, clinics, diagnostic centres and service engineers
-enquiring about imaging equipment and consumables.
-
-{
-  "primary_emotion": one of
-      "interested" | "ready" | "neutral" | "uncertain" |
-      "frustrated" | "angry" | "confused",
-  "sentiment_score": float -1.0 to 1.0,
-  "buying_intent_score": float 0.0 to 1.0,
-  "friction_score": float 0.0 to 1.0,
-  "objections": array of short labels from
-      ["price", "delivery_time", "minimum_order", "specification_unclear",
-       "trust", "support", "compatibility", "payment_terms", "other"]
-}
-
-Guidance:
-- "ready" and high buying_intent = asked for a quotation, price or availability.
-- "frustrated" or "angry" = any complaint, impatience, or repeated question.
-- "uncertain" = needs more information before deciding.
-- friction_score rises with confusion, repetition or blockers.
-- An objection is only listed when the buyer actually raised it.
-
-Message:
-{message}
-"""
+# The fallback is the shared package's **generic** prompt from `config.py` —
+# the constant `test_the_default_prompt_names_no_industry` guards. Until CL-9
+# a second, industry-flavoured copy lived here and was what the fallback
+# actually served: a package that promises to name no product was falling back
+# to a prompt about hospitals and imaging equipment, while its own test checked
+# a constant nothing used. One prompt, one source (`work-status.md` §10).
 
 
 def build_extraction_prompt(message: str, *, prompt: str | None = None) -> str:
-    return (prompt or EXTRACTION_PROMPT).replace("{message}", (message or "")[:2000])
+    return (prompt or GENERIC_EXTRACTION_PROMPT).replace("{message}", (message or "")[:2000])
 
 
 # ---------------------------------------------------------------------------

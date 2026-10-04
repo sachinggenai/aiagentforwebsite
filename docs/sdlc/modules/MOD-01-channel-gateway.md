@@ -115,6 +115,29 @@ Every reply is rendered by the originating adapter (TwiML, WhatsApp content API 
 
 Events: `channel.inbound.accepted`, `channel.inbound.rejected`, `channel.send.failed` — emitted best-effort to MOD-08 (`BRD-21`). Consumers: MOD-08 only; no conversation path depends on them.
 
+**As built (US-002/US-003, 2026-10-04).** The adapter interface did not change —
+`ChannelAdapter.parse/render` is as specified, and `ChannelGateway.accept()`
+finally has runtime callers. What is new around it, all reachable from a served
+route:
+
+* `POST /twilio/whatsapp` — signature → attribution → `MessageSid` dedupe
+  (`inbound_event` PK) → content taxonomy (voice note declined, unsupported
+  media explained, media-without-caption asked for context) → the *same*
+  answer engine as web chat → render → `outbound_send`. The webhook answers
+  empty; the reply travels through the Messages API.
+* `POST /channels/{channel_id}/inbound` — `AdapterRegistry` (declare → validate
+  → probe → enable, idempotent, per-channel failure isolation) + HMAC over the
+  **raw** body. A disabled channel is refused politely with its config retained.
+* `WS /voice/browser` — token in the first frame, admission against the same
+  controller as PSTN, 20 turns/min per session, 30 s idle close, close codes
+  `4001`/`4002`/`4008`.
+* `outbound_send` (SQLite dialect of TRD-04's Postgres DDL) with the documented
+  5 s → 15 m schedule, 5 attempts, partial due-index. `FAILED` rows are read by
+  `GET /api/admin/sends` and rendered in the ops console.
+* `inbound_event` now also records refusals (`disposition='rejected'`), and
+  `rejected_ingress` / `rate_limit_event` count refusals by class — the limiter
+  stores a salted hash, never the raw identity.
+
 ### B.4 Data Model
 
 ```mermaid

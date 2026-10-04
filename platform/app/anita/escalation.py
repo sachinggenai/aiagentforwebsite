@@ -42,6 +42,10 @@ class EscalationRecord:
     category: str
     dispatched: bool
     handoff_id: str | None = None
+    #: US-022: whether a rep was actually reached. `dispatched` says a handoff
+    #: was opened; this says somebody knows. Keeping them separate is what
+    #: stops "we escalated" from quietly meaning "nobody was told".
+    notified: bool = False
 
 
 @dataclass
@@ -56,6 +60,10 @@ class EscalationSink:
     store: Any
     crm: Any = None
     config: Any = None
+    #: US-022: called with the recorded `Handoff`; returns True when a rep was
+    #: reached. None means the deployment has no notifier — handoffs stay
+    #: `open` for the admin queue, which is a state, not a failure.
+    notifier: Any = None
     records: list[EscalationRecord] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -74,13 +82,33 @@ class EscalationSink:
             handoff = self.crm.record_handoff(Handoff(
                 handoff_id="",           # the store assigns; idempotent per lead
                 lead_id=record.lead_id,
+                conversation_id=record.conversation_id,
                 reason=record.reason,
                 sentiment_score=record.score,
             ))
+            self._notify(handoff, record)
             return getattr(handoff, "handoff_id", None)
         except Exception:  # noqa: BLE001 - a failed sink must not fail the turn
             logger.exception("could not open a handoff for lead %s", record.lead_id)
             return None
+
+    def _notify(self, handoff: Any, record: EscalationRecord) -> None:
+        """Tell a rep, and record whether that actually happened (US-022).
+
+        The handoff exists either way; only a delivered notification moves it to
+        `notified`. A missing notifier is a deployment that has not configured
+        SMTP, not an error — the handoff stays `open` in the admin queue.
+        """
+        if self.notifier is None:
+            return
+        try:
+            if self.notifier(handoff):
+                record.notified = True
+                mark = getattr(self.crm, "mark_notified", None)
+                if mark is not None:
+                    mark(handoff.handoff_id)
+        except Exception:  # noqa: BLE001 - notifying must never fail the turn
+            logger.exception("escalation notification raised for %s", handoff.handoff_id)
 
     def __call__(self, state: Any, reason: str, extraction: Any) -> None:
         """The `on_escalate` callback `SentimentCore.observe` invokes.

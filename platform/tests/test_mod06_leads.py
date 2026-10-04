@@ -482,3 +482,154 @@ class TestProductQuestionsAreNotPhoneNumbers:
         assert normalise_phone("6835421") is None
         assert normalise_phone("12345") is None
         assert normalise_phone("1234567890123456789") is None
+
+
+# ---------------------------------------------------------------------------
+# US-022 — handoffs that can actually be opened, notified and reviewed
+# ---------------------------------------------------------------------------
+class TestUS022HandoffsAndNotification:
+    """The audit found three defects, all live:
+
+    * `handoff_id=""` was inserted verbatim, so the first handoff took the
+      empty PRIMARY KEY and every later one died on the UNIQUE constraint,
+      swallowed into `dispatched=False` — **one handoff per database lifetime**.
+    * the handoff's `lead_id` was the conversation id, so it linked to no lead.
+    * nothing notified anyone, and no route exposed the queue.
+    """
+
+    def _store(self):
+        from anita.crm import MockCrmStore
+
+        return MockCrmStore(":memory:")
+
+    def _record(self, lead_id="", conversation_id="c1"):
+        from anita.escalation import EscalationRecord
+
+        return EscalationRecord(
+            lead_id=lead_id, conversation_id=conversation_id, reason="emotion=angry",
+            score=-1.0, emotion="angry", category="Hot", dispatched=False,
+        )
+
+    def test_two_handoffs_for_different_leads_both_persist(self):
+        from anita.crm import Handoff
+
+        store = self._store()
+        first = store.record_handoff(Handoff(handoff_id="", lead_id="lead-a", reason="angry"))
+        second = store.record_handoff(Handoff(handoff_id="", lead_id="lead-b", reason="angry"))
+
+        assert first.handoff_id and second.handoff_id
+        assert first.handoff_id != second.handoff_id
+        assert len(store.list_handoffs()) == 2
+
+    def test_idempotency_per_lead_is_preserved(self):
+        from anita.crm import Handoff
+
+        store = self._store()
+        store.record_handoff(Handoff(handoff_id="", lead_id="lead-a", reason="angry"))
+        store.record_handoff(Handoff(handoff_id="", lead_id="lead-a", reason="angry"))
+        assert len(store.list_handoffs()) == 1
+
+    def test_anonymous_escalations_are_per_conversation(self):
+        """No lead? Two conversations must not collapse into one handoff, and
+        a conversation id must never be stored as a lead id."""
+        from anita.crm import Handoff
+
+        store = self._store()
+        store.record_handoff(
+            Handoff(handoff_id="", lead_id="", conversation_id="conv-1", reason="angry")
+        )
+        store.record_handoff(
+            Handoff(handoff_id="", lead_id="", conversation_id="conv-2", reason="angry")
+        )
+        store.record_handoff(
+            Handoff(handoff_id="", lead_id="", conversation_id="conv-1", reason="angry")
+        )
+
+        rows = store.list_handoffs()
+        assert len(rows) == 2, "conv-1 deduped, conv-2 separate"
+        assert all(row.lead_id == "" for row in rows)
+        assert {row.conversation_id for row in rows} == {"conv-1", "conv-2"}
+
+    def test_a_delivered_notification_moves_the_handoff_to_notified(self):
+        from anita.escalation import EscalationSink
+
+        store = self._store()
+        notified = []
+
+        def notifier(handoff):
+            notified.append(handoff.handoff_id)
+            return True
+
+        sink = EscalationSink(store=None, crm=store, notifier=notifier)
+        record = self._record(lead_id="lead-a")
+        handoff_id = sink._open_handoff(record)   # `__call__` assigns it to the record
+
+        assert record.notified is True
+        assert notified == [handoff_id]
+        assert store.list_handoffs()[0].state == "notified"
+        assert store.list_handoffs()[0].notified_at
+
+    def test_no_notifier_leaves_the_handoff_open_and_quiet(self):
+        from anita.escalation import EscalationSink
+
+        store = self._store()
+        sink = EscalationSink(store=None, crm=store, notifier=None)
+        record = self._record(lead_id="lead-a")
+        sink._open_handoff(record)
+
+        assert record.notified is False
+        assert store.list_handoffs()[0].state == "open", "recorded, awaiting a human"
+
+    def test_a_broken_notifier_does_not_fail_the_escalation(self):
+        from anita.escalation import EscalationSink
+
+        store = self._store()
+
+        def notifier(handoff):
+            raise OSError("smtp down")
+
+        sink = EscalationSink(store=None, crm=store, notifier=notifier)
+        record = self._record(lead_id="lead-a")
+        sink._open_handoff(record)
+
+        assert record.dispatched is False, "the sink flags it honestly"
+        assert store.list_handoffs()[0].state == "open"
+        assert record.notified is False
+
+    def test_the_notifier_is_absent_without_configuration(self):
+        from anita.notify import from_environment
+
+        assert from_environment({}) is None
+        assert from_environment({"SMTP_HOST": "smtp.example.com"}) is None, "no recipient"
+        built = from_environment(
+            {"SMTP_HOST": "smtp.example.com", "SALES_NOTIFY_EMAIL": "sales@example.com"}
+        )
+        assert built is not None and built.to == "sales@example.com"
+
+    def test_the_admin_queue_lists_handoffs(self):
+        from anita.crm import Handoff
+        from anita.surfaces import AdminSurface
+
+        store = self._store()
+        store.record_handoff(Handoff(handoff_id="", lead_id="lead-a", reason="angry"))
+
+        surface = AdminSurface(crm=store)
+        response = surface.handoffs()
+        assert response.status == 200
+        assert response.body["open"] == 1
+        assert response.body["handoffs"][0]["lead_id"] == "lead-a"
+        assert response.body["handoffs"][0]["conversation_id"] == ""
+
+    def test_the_admin_queue_says_so_when_the_crm_is_missing(self):
+        from anita.surfaces import AdminSurface
+
+        response = AdminSurface(crm=None).handoffs()
+        assert response.status == 503
+        assert response.body["unavailable"] is True
+
+    def test_the_route_is_registered_and_authenticated(self):
+        from anita.server import METHOD_AND_PATH
+        from anita.surfaces import ROUTE_TABLE, Route, Surface
+
+        assert METHOD_AND_PATH[Route.ADMIN_HANDOFFS] == ("GET", "/api/admin/handoffs")
+        assert ROUTE_TABLE[Route.ADMIN_HANDOFFS] == (Surface.ADMIN_CONSOLE, True)

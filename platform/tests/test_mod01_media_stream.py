@@ -71,6 +71,10 @@ class FakeSession:
         self.frames_seen = 0
         self.admitted = 0
         self.processed = 0
+        self.truncated_marks = 0
+
+    def note_answer_truncated(self) -> None:
+        self.truncated_marks += 1
 
     def feed_audio(self, frame: bytes) -> bool:
         self.frames_seen += 1
@@ -499,3 +503,54 @@ class TestTheCallCeiling:
         asyncio.run(relay.handle_message(json.dumps(_start())))
         asyncio.run(relay.handle_message(json.dumps(_media())))
         assert not relay._closed
+
+
+class TestUS017BargeInClearsPlayout:
+    """The engine stopping is only half a barge-in.
+
+    Twilio keeps playing audio it has already buffered, so without a `clear`
+    frame the interrupted answer keeps talking out of the carrier's buffer —
+    which sounds exactly like the interruption failed. `clear_playout()` existed
+    and had no caller in `app/`.
+    """
+
+    def _speak_over(self, verdict):
+        session = FakeSession(end_after=99, verdict=verdict)
+        relay, sent = _relay(session)
+        asyncio.run(relay.handle_message(json.dumps(_start())))
+        relay._speaking = True  # as it is while the answer plays
+        asyncio.run(relay.handle_message(json.dumps(_media())))
+        return session, sent
+
+    def test_an_admitted_interruption_clears_twilios_buffer(self):
+        _session, sent = self._speak_over(FRAME_INTERRUPTION)
+        clears = [m for m in sent if m["event"] == "clear"]
+        assert len(clears) == 1, f"expected exactly one clear, got {len(clears)}"
+        assert clears[0]["streamSid"] == STREAM_SID
+
+    def test_an_admitted_interruption_marks_the_answer_truncated(self):
+        """The transcript must record that the caller did not hear the end."""
+        session, _sent = self._speak_over(FRAME_INTERRUPTION)
+        assert session.truncated_marks == 1
+
+    @pytest.mark.parametrize("verdict", [FRAME_ECHO, FRAME_MUTED])
+    def test_echo_and_muted_frames_do_not_clear(self, verdict):
+        """The assistant must not stop its own answer for its own voice."""
+        session, sent = self._speak_over(verdict)
+        assert not [m for m in sent if m["event"] == "clear"]
+        assert session.truncated_marks == 0
+
+    def test_a_second_admitted_frame_does_not_re_signal(self):
+        """One barge-in, one clear: after admission the engine returns to
+        LISTENING, so the caller's continuing speech must not clear again."""
+        session = FakeSession(end_after=99, verdict=FRAME_INTERRUPTION)
+        relay, sent = _relay(session)
+        asyncio.run(relay.handle_message(json.dumps(_start())))
+        relay._speaking = True
+        asyncio.run(relay.handle_message(json.dumps(_media())))
+        session.verdict = FRAME_LISTENING  # as it is once the turn yields
+        asyncio.run(relay.handle_message(json.dumps(_media())))
+
+        clears = [m for m in sent if m["event"] == "clear"]
+        assert len(clears) == 1, f"re-signalled on continuing speech: {len(clears)} clears"
+        assert session.truncated_marks == 1

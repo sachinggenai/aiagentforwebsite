@@ -179,6 +179,33 @@ Company facts are answered from the same collection: `company_ids` (GST `07AAACA
 | `chunks.jsonl` + `ams.sqlite` | **consumed** | file / SQLite read | `DAT-01`, `DAT-02`, `DAT-03`, `DAT-05` | Read-only, path from config |
 | `index.build.started` / `index.build.rejected` / `index.promoted` | published | event (MOD-08 trace) | `{build_id, collection, chunk_count, dim, reason?}` | Internal |
 
+**As built (US-010 + US-012, 2026-10-04).** Two additions, both read by a
+running process rather than by a test:
+
+* **The index has a lifecycle with a memory.** `SqliteBuildStore` persists
+  `anita.index_builds` with the story's partial unique index
+  (`UNIQUE (collection) WHERE state = 'LIVE'`); promotion runs in one
+  transaction and writes the **pointer** the serving process reads
+  (`assembly` asks the store which collection is live, falling back to the
+  configured name). `scripts/rebuild_index.py` is the operational entry point:
+  begin → embed → validate against the frozen set → promote or reject, and a
+  rejection leaves the previous build serving. The boot preflight gained an
+  `INDEX` phase that refuses when there is neither a built index nor a
+  promoted build, naming the command that fixes it.
+* **Coverage is a first-class answer.** `coverage.CoverageProbe` is the single
+  definition of "published", keyed per product id, and the answer engine
+  consults it before retrieval: a product with no published specifications or
+  About is answered as exactly that (0 LLM calls, human offer attached), not
+  declined. Every grounded reply carries `grounded_on` — the TRD-16 payload
+  (chunk id, type, product, source URL, content hash) — surfaced through the
+  API and stored on the turn so the console review renders the grounding.
+  `citation_incomplete` is counted and the release gate fails on a non-zero
+  count over the frozen set.
+
+**Not claimed:** the probe is not exposed on the admin console; reads share the
+corpus connection (single process, read-only). Both are recorded rather than
+implied.
+
 ### B.4 Data Model
 
 MOD-03 owns no corpus tables — the corpus is read-only (`DAT-01`…`DAT-05`). It owns the vector index (`DAT-12`) and one lifecycle table it adds to the ANITA schema (extends `REC-13`'s DDL pattern):

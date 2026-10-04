@@ -51,9 +51,9 @@ def main() -> int:
     print("=" * 90)
 
     from anita.answers import AnitaAnswers
-    from anita.assembly import assemble
+    from anita.assembly import assemble, deployed_environment
 
-    built = assemble(require_preflight=False)
+    built = assemble(require_preflight=False, env=deployed_environment())
     chat = built.chat
     corpus = built.chat.answers.corpus
     answers = built.chat.answers

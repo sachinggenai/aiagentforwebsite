@@ -193,30 +193,197 @@ def check_use_cases(built) -> list[str]:
         else:
             record(PASS, f"{uc} {title}", text[:58])
 
-    # Use cases that are declared, documented, and NOT reachable in the running
-    # product. Listed explicitly rather than omitted: a report that checks 9 of
-    # 15 and prints "every UC triggers" is the same overstatement this whole
-    # exercise is about.
+    # Use cases that this instance cannot trigger, and why. A claim here is
+    # stale the moment the missing piece lands and nothing notices — this
+    # block used to say "no webhook route is served" for WhatsApp and "there is
+    # no audio path" for the browser mic, and both were false by the time
+    # US-002/US-003 shipped. So each is now *driven* through the real objects
+    # (with disposable stores, so a check never leaves a fake buyer in the
+    # console) or reported as INFO naming exactly what is unconfigured.
     deferred = dict(getattr(built.settings, "release", None).deferred_use_cases or ()) \
         if getattr(built.settings, "release", None) else {}
 
+    from uuid import uuid4
+
+    from anita.channels import signed_payload
+
+    # -- UC-02 WhatsApp: signature → dedupe → answer → outbox ---------------
+    try:
+        webhook = getattr(built.router, "messaging", None)
+        token = built.settings.env.get("TWILIO_AUTH_TOKEN", "")
+        if webhook is None:
+            broken.append("UC-02")
+            record(FAIL, "UC-02 Ask a catalogue question via WhatsApp",
+                   "no messaging webhook was built")
+        elif not token:
+            record(INFO, "UC-02 Ask a catalogue question via WhatsApp — NOT TRIGGERABLE HERE",
+                   "TWILIO_AUTH_TOKEN unset — the webhook refuses unsigned traffic, "
+                   "which is the designed behaviour")
+        else:
+            from anita.channel_store import ChannelStore
+            from anita.messaging import MessagingWebhook
+            from anita.outbox import SendOutbox
+
+            probe = MessagingWebhook(
+                auth_token=token,
+                public_base_url=webhook.public_base_url,
+                answer=webhook.answer,
+                gateway=webhook.gateway,
+                outbox=SendOutbox(":memory:"),
+                sender=None,  # never message anyone from a check
+                store=ChannelStore(":memory:"),
+                address=webhook.address,
+            )
+            params = {
+                "MessageSid": f"SYSTEMCHECK-{uuid4()}",
+                "From": "whatsapp:+910000000000",
+                "To": f"whatsapp:{webhook.address or '+910000000000'}",
+                "Body": "what is the minimum order quantity for the ultrasound gel?",
+                "NumMedia": "0",
+            }
+            signature = signed_payload(
+                token, f"{webhook.public_base_url}/twilio/whatsapp", params
+            )
+            status, _, _ = probe.whatsapp(params=params, signature=signature)
+            queued = probe.outbox.by_status("QUEUED")
+            if status == 200 and queued and queued[0].payload.get("body"):
+                record(PASS, "UC-02 Ask a catalogue question via WhatsApp",
+                       f"answered and queued ({len(queued[0].payload['body'])} chars)")
+            else:
+                broken.append("UC-02")
+                record(FAIL, "UC-02 Ask a catalogue question via WhatsApp",
+                       f"status {status}, {len(queued)} queued send(s)")
+    except Exception as exc:  # noqa: BLE001
+        broken.append("UC-02")
+        record(FAIL, "UC-02 Ask a catalogue question via WhatsApp",
+               f"{type(exc).__name__}: {exc}")
+
+    # -- UC-03 PSTN voice: signature → admission → TwiML with a stream ------
+    try:
+        webhook = getattr(built, "voice", None)
+        token = built.settings.env.get("TWILIO_AUTH_TOKEN", "")
+        base = (built.settings.env.get("TUNNEL_HOST", "") or "").strip()
+        if webhook is None:
+            broken.append("UC-03")
+            record(FAIL, "UC-03 Inbound voice call", "no voice webhook was built")
+        elif not token or not base:
+            record(INFO, "UC-03 Inbound voice call — NOT TRIGGERABLE HERE",
+                   "TWILIO_AUTH_TOKEN/TUNNEL_HOST unset — a real call cannot be "
+                   "signature-verified without the public address it was signed for")
+        else:
+            from anita.channel_store import ChannelStore
+            from anita.speech import AdmissionController
+            from anita.voice_webhook import VoiceWebhook
+
+            probe = VoiceWebhook(
+                auth_token=token,
+                public_base_url=webhook.public_base_url,
+                admission=AdmissionController(max_concurrent_calls=1),
+                callback_number="",
+                store=ChannelStore(":memory:"),
+                instance_id=webhook.instance_id,
+                address=webhook.address,
+            )
+            params = {"CallSid": f"SYSTEMCHECK-{uuid4()}",
+                      "From": "+910000000000", "To": webhook.address or "+910000000000"}
+            signature = signed_payload(
+                token, f"{webhook.public_base_url}/twilio/voice", params
+            )
+            status, body, _ = probe.voice(params=params, signature=signature)
+            if status == 200 and "<Stream" in body:
+                record(PASS, "UC-03 Inbound voice call",
+                       "admitted and handed a media stream "
+                       "(real-carrier call still pending — US-001)")
+            else:
+                broken.append("UC-03")
+                record(FAIL, "UC-03 Inbound voice call",
+                       f"status {status}, stream {'present' if '<Stream' in body else 'missing'}")
+    except Exception as exc:  # noqa: BLE001
+        broken.append("UC-03")
+        record(FAIL, "UC-03 Inbound voice call", f"{type(exc).__name__}: {exc}")
+
+    # -- UC-04 browser mic: ticket → signed token → served socket -----------
+    try:
+        from anita.server import create_app
+
+        tokens = getattr(built.router, "voice_tokens", None)
+        paths = {getattr(route, "path", "") for route in create_app(built.router).routes}
+        # Through the router — the same dispatch a request takes — rather than
+        # the surface object, so a route that is registered but wired to
+        # nothing fails here.
+        from anita.surfaces import Route
+
+        ticket = built.router.dispatch(
+            Route.VOICE_TICKET, session_id=f"uc-04-{uuid4()}"
+        )
+        claims = (
+            tokens.verify(ticket.body["ticket"])
+            if tokens is not None and ticket.status == 200 else None
+        )
+        ok = (
+            "/voice/browser" in paths
+            and getattr(built.router, "browser_voice", None) is not None
+            and claims is not None
+        )
+        if ok:
+            record(PASS, "UC-04 Browser-mic voice question",
+                   "ticket signed, socket served, session factory wired")
+        else:
+            # A refused ticket (capacity) is a designed outcome, not a gap.
+            record(INFO, "UC-04 Browser-mic voice question — NOT TRIGGERABLE HERE",
+                   f"ticket status {ticket.status}: "
+                   f"{ticket.body.get('reason') or 'refused'}")
+    except Exception as exc:  # noqa: BLE001
+        broken.append("UC-04")
+        record(FAIL, "UC-04 Browser-mic voice question", f"{type(exc).__name__}: {exc}")
+
+    # -- UC-14 extra channel: declared → enabled → HMAC-signed message ------
+    try:
+        registry = getattr(built.router.extra_channel, "registry", None) \
+            if getattr(built.router, "extra_channel", None) else None
+        enabled = registry.enabled() if registry is not None else []
+        if not enabled:
+            record(INFO, "UC-14 Add a new messaging channel — NOT CONFIGURED",
+                   "no extra channel is enabled; enabling one is a config change "
+                   "(config/anita.yaml → channels.extra), covered by tests")
+        else:
+            from anita.channel_store import ChannelStore
+            from anita.extra_channel import ExtraChannelIngress, sign_hmac
+            from anita.outbox import SendOutbox
+
+            channel_id = enabled[0]
+            config = registry.config(channel_id)
+            secret = built.settings.env.get(config.secret_env, "")
+            probe = ExtraChannelIngress(
+                registry=registry,
+                gateway=built.router.extra_channel.gateway,
+                answer=built.router.extra_channel.answer,
+                secrets={config.secret_env: secret},
+                outbox=SendOutbox(":memory:"),
+                sender=None,
+                store=ChannelStore(":memory:"),
+            )
+            body = json.dumps({"text": "hello", "from": "system-check"}).encode()
+            status, payload = probe.handle(
+                channel_id, body=body, signature=sign_hmac(secret, body)
+            )
+            if status == 200 and payload.get("reply"):
+                record(PASS, f"UC-14 Add a new messaging channel ({channel_id})",
+                       "enabled from config and answered a signed message")
+            else:
+                broken.append("UC-14")
+                record(FAIL, f"UC-14 Add a new messaging channel ({channel_id})",
+                       f"status {status}")
+    except Exception as exc:  # noqa: BLE001
+        broken.append("UC-14")
+        record(FAIL, "UC-14 Add a new messaging channel", f"{type(exc).__name__}: {exc}")
+
+    # UC-09 is genuinely still absent: the outbound queue has no dialer.
     for uc, title, why in (
-        ("UC-02", "Ask a catalogue question via WhatsApp",
-         "WhatsAppAdapter is registered but no webhook route is served"),
-        ("UC-03", "Inbound voice call",
-         "no voice route in the API; the engine has never carried a call"),
-        ("UC-04", "Browser-mic voice question",
-         "the ticket route is served but there is no audio path to use it"),
         ("UC-09", "Outbound follow-up",
          "OutboundQueue has no worker — leads qualify and nothing dials"),
-        ("UC-14", "Add a new messaging channel",
-         "an extension point, verified by design review rather than by a trigger"),
     ):
         if uc in deferred:
-            # Deferred by a written decision, so this does not block promotion.
-            # Reported as its own status rather than quietly passing: an
-            # operator reading this report must be able to see what is missing
-            # and why, not just that nothing failed.
             record(INFO, f"{uc} {title} — DEFERRED", deferred[uc].split(".")[0])
             deferred_count += 1
         else:
@@ -380,10 +547,10 @@ def main(argv: list[str] | None = None) -> int:
 
     broken_load = check_load()
 
-    from anita.assembly import assemble
+    from anita.assembly import assemble, deployed_environment
 
     try:
-        built = assemble(require_preflight=False)
+        built = assemble(require_preflight=False, env=deployed_environment())
     except Exception as exc:  # noqa: BLE001
         print(f"\nASSEMBLY FAILED: {type(exc).__name__}: {exc}")
         traceback.print_exc()

@@ -20,8 +20,10 @@ says "all clear" during an outage.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import os
 import threading
 import time
 import uuid
@@ -41,13 +43,28 @@ MAX_REGRESSION = 0.02
 # ---------------------------------------------------------------------------
 # Tracing
 # ---------------------------------------------------------------------------
+#: Trace log rotation (TAC-5). 100 MB per file, 7 retained.
+ROTATE_BYTES = 100 * 1024 * 1024
+KEEP_FILES = 7
+
+
 @dataclass
 class TurnTrace:
-    """One conversation turn, as measured."""
+    """One conversation turn, as measured.
+
+    Stages are recorded by `mark()` as the turn runs and turned into durations
+    at write time. **A stage that did not run is absent, never zero** (TAC-3):
+    `durations_ms` only ever contains intervals between marks that actually
+    happened, so a reader can tell a short turn from a broken one.
+
+    Every method swallows its own exceptions. Telemetry that can fail a turn is
+    worse than no telemetry (TAC-1/TAC-4), so nothing here raises into a caller.
+    """
 
     trace_id: str
     conversation_id: str = ""
     channel: str = ""
+    turn_no: int = 0
     intent: str = ""
     stage: str = "complete"
     retrieved_chunks: int = 0
@@ -57,10 +74,103 @@ class TurnTrace:
     degraded: str = ""
     failed: bool = False
     error: str = ""
+    outcome: str = ""
+    admission_refused: bool = False
+    #: The sentiment category, set from a closed enum by the caller — never
+    #: from buyer text, which is why it is a typed field rather than a counter
+    #: (`note()` refuses strings, and that refusal is the PII guard).
+    sentiment_category: str = ""
+    #: Stage → monotonic timestamp. Private: never serialised directly; the
+    #: written form is `stages_seen` plus `durations_ms`.
+    _marks: dict[str, float] = field(default_factory=dict, repr=False)
+    #: Numeric counters only — `note()` drops anything else, so a buyer's name
+    #: or transcript text cannot enter a trace through the counter path (TAC-4).
+    _counters: dict[str, float | int | bool] = field(default_factory=dict, repr=False)
+    dropped_marks: int = 0
+    clock_skew: bool = False
     at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
+    # -- recording ---------------------------------------------------------
+    def mark(self, stage: str, **counters) -> None:
+        """Record a stage boundary. First mark for a stage wins; a repeat is
+        counted in `dropped_marks` rather than overwriting the timestamp."""
+        try:
+            if stage in self._marks:
+                self.dropped_marks += 1
+                return
+            self._marks[stage] = time.monotonic()
+            if counters:
+                self.note(**counters)
+        except Exception:  # noqa: BLE001 - a trace must never fail a turn
+            pass
+
+    def note(self, **counters) -> None:
+        """Attach counters to the turn. Non-numeric values are dropped, not
+        stored — the refusal is the mechanism that keeps PII out (TAC-4)."""
+        try:
+            for key, value in counters.items():
+                if isinstance(value, (int, float, bool)):
+                    self._counters[key] = value
+                else:
+                    self.dropped_marks += 1
+        except Exception:  # noqa: BLE001
+            pass
+
+    # -- serialisation -----------------------------------------------------
+    @property
+    def stages_seen(self) -> list[str]:
+        """Stages in the order they were marked. Always present, so a reader
+        can tell a short turn from a broken one (TAC-3)."""
+        return list(self._marks)
+
+    def durations_ms(self) -> dict[str, int]:
+        """Milliseconds between consecutive *present* marks, keyed by the stage
+        that closed the interval. A missing stage has no key at all."""
+        out: dict[str, int] = {}
+        previous: tuple[str, float] | None = None
+        for stage, stamp in self._marks.items():
+            if previous is not None:
+                delta = stamp - previous[1]
+                if delta < 0:
+                    # A clock jump backwards. Clamp and flag rather than write
+                    # a negative latency a reader would have to disbelieve.
+                    self.clock_skew = True
+                    delta = 0.0
+                out[stage] = int(round(delta * 1000))
+            previous = (stage, stamp)
+        return out
+
     def as_dict(self) -> dict:
-        return asdict(self)
+        stamps = list(self._marks.values())
+        total = self.total_ms
+        if total is None and len(stamps) >= 2:
+            total = round((stamps[-1] - stamps[0]) * 1000, 1)
+        return {
+            "trace_id": self.trace_id,
+            "conversation_id": self.conversation_id,
+            "channel": self.channel,
+            "turn_no": self.turn_no,
+            "intent": self.intent,
+            "stage": self.stage,
+            "stages_seen": self.stages_seen,
+            "durations_ms": self.durations_ms(),
+            "counters": dict(self._counters),
+            "retrieved_chunks": self.retrieved_chunks,
+            "grounded": self.grounded,
+            "total_ms": total,
+            "first_token_ms": self.first_token_ms,
+            "degraded": self.degraded,
+            "failed": self.failed,
+            "error": self.error,
+            "outcome": self.outcome,
+            "admission_refused": self.admission_refused,
+            "sentiment": (
+                {"category": self.sentiment_category} if self.sentiment_category else {}
+            ),
+            "dropped_marks": self.dropped_marks,
+            "clock_skew": self.clock_skew,
+            "at": self.at,
+        }
 
 
 class TraceSink(Protocol):
@@ -73,15 +183,49 @@ class JsonlSink:
     The path is passed in; this module never derives it, because the isolation
     requirement (`BRD-18`) says telemetry must not land in a shared directory
     and the safe source for that path is the config, not a default here.
+
+    Rotates at 100 MB keeping 7 files (TAC-5). The rotating file is renamed
+    rather than truncated, so a reader that already opened it keeps a
+    consistent view, and `TraceWriter` counts a rotation failure as a dropped
+    write rather than losing the turn silently.
     """
 
-    def __init__(self, path: Path | str) -> None:
+    def __init__(
+        self,
+        path: Path | str,
+        *,
+        rotate_bytes: int = ROTATE_BYTES,
+        keep_files: int = KEEP_FILES,
+    ) -> None:
         self.path = Path(path)
+        self.rotate_bytes = rotate_bytes
+        self.keep_files = keep_files
 
     def write(self, trace: TurnTrace) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._rotate_if_needed()
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(trace.as_dict(), ensure_ascii=False) + "\n")
+
+    def _rotate_if_needed(self) -> None:
+        try:
+            size = self.path.stat().st_size
+        except FileNotFoundError:
+            return
+        if size < self.rotate_bytes:
+            return
+
+        def numbered(index: int) -> Path:
+            return self.path.with_name(f"{self.path.name}.{index}")
+
+        oldest = numbered(self.keep_files)
+        if oldest.exists():
+            oldest.unlink()
+        for index in range(self.keep_files - 1, 0, -1):
+            source = numbered(index)
+            if source.exists():
+                os.replace(source, numbered(index + 1))
+        os.replace(self.path, numbered(1))
 
 
 class MemorySink:
@@ -222,6 +366,8 @@ class GateReport:
     grounded_rate: float | None = None
     reason: str = ""
     duration_ms: float = 0.0
+    #: TAC-1: the digest of the exact set this run scored against.
+    set_sha256: str = ""
 
     @property
     def failed_ids(self) -> list[str]:
@@ -235,6 +381,7 @@ class GateReport:
             "grounded_rate": self.grounded_rate,
             "reason": self.reason,
             "duration_ms": round(self.duration_ms, 1),
+            "set_sha256": self.set_sha256,
         }
 
 
@@ -284,11 +431,13 @@ class QualityGate:
         baseline_grounded_rate: float | None = None,
         min_grounded_rate: float = MIN_GROUNDED_RATE,
         max_regression: float = MAX_REGRESSION,
+        set_sha256: str = "",
     ) -> None:
         self.cases = list(cases)
         self.baseline_grounded_rate = baseline_grounded_rate
         self.min_grounded_rate = min_grounded_rate
         self.max_regression = max_regression
+        self.set_sha256 = set_sha256
 
     def evaluate(self, answerer: Callable[[EvalCase], str]) -> GateReport:
         """Run every case. A case that errors counts as a failure, not a skip.
@@ -317,11 +466,12 @@ class QualityGate:
         duration = (time.monotonic() - started) * 1000
 
         report = GateReport(
-            passed=not failures,
+            passed=False,   # derived below; never assume a verdict before the rules run
             total=total,
             failures=failures,
             grounded_rate=grounded_rate,
             duration_ms=duration,
+            set_sha256=self.set_sha256,
         )
 
         if not total:
@@ -359,9 +509,27 @@ class QualityGate:
                 )
                 return report
 
+        # Reached only when no critical case failed and both floors hold. A
+        # non-critical failure inside the tolerance passes — that is what a
+        # 98 % floor means — but the report must *say so* rather than claiming
+        # every case passed. The unconditional `passed = True` that used to sit
+        # here reported a run with failures as a clean sweep (US-027).
         report.passed = True
-        report.reason = f"all {total} cases passed"
+        if failures:
+            report.reason = (
+                f"{total - len(failures)} of {total} cases passed; "
+                f"{len(failures)} non-critical failure(s) within the "
+                f"{1 - self.min_grounded_rate:.0%} tolerance: {report.failed_ids}"
+            )
+        else:
+            report.reason = f"all {total} cases passed"
         return report
+
+
+def eval_set_sha256(path: Path | str) -> str:
+    """The frozen set's digest, so a promoted release can be tied to the exact
+    question set it passed (TAC-1)."""
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 def load_eval_set(path: Path | str) -> list[EvalCase]:
@@ -520,7 +688,13 @@ def combine_validation(
     if not gate.passed:
         reason = gate.reason or "evaluation set failed"
     elif not browser.passed:
-        reason = f"browser scenarios failed: {list(browser.failed)[:5]}"
+        if browser.total == 0:
+            # It did not run at all — an environment problem, and the reason
+            # names it. "failed: []" reads as a product failure with no
+            # failures, which is the confusion §8.19 exists to remove.
+            reason = f"browser suite did not run — {browser.reason or 'no reason given'}"
+        else:
+            reason = f"browser scenarios failed: {list(browser.failed)[:5]}"
     elif not system.passed:
         # Named, not counted: "6 use cases unreachable" tells an operator to go
         # and look. "system check failed" does not.

@@ -2,25 +2,25 @@
 Real-time voice call handler — runs STT → RAG → LLM → TTS inside a
 Twilio Media Streams WebSocket loop.
 
-Reuses the same components that power WhatsApp voice notes:
-  - openai-whisper (base) for speech-to-text
-  - app.rag.query_rag() for RAG + LLM
+Reuses the platform's adapters, one per stage:
+  - faster-whisper (model from `SpeechSettings.whisper_model`) for speech-to-text
+  - anita.voice_pipeline / anita.voice_rag for retrieval and the answer
   - kokoro_onnx.Kokoro for text-to-speech
 
 Flow (inside the WebSocket media loop):
   1. Accumulate µ-law audio chunks until the caller stops speaking.
-  2. Decode → PCM, run Whisper STT.
-  3. Feed transcription to the shared RAG module → LLM answer.
+  2. Decode → PCM, run faster-whisper STT.
+  3. Hand the transcript to the installed answer engine.
   4. Synthesise answer with Kokoro TTS → PCM.
   5. Encode PCM → µ-law, send back through WebSocket.
   6. Listen for the next utterance.
 
-Usage (in app/main.py):
-    from .voice import VoiceCallSession
+Usage (from `anita.media_stream`, one session per call):
+    from anita.voice import VoiceCallSession
 
     session = VoiceCallSession()
-    async for out_ulaw in session.handle_media(ulaw_bytes):
-        await websocket.send_text(...)
+    if session.feed_audio(ulaw_frame):
+        chunks, dialogue, end_call = await session.process_utterance()
 """
 
 from __future__ import annotations
@@ -43,12 +43,12 @@ from typing import AsyncIterator, Callable
 from . import audio_format
 from .voice_settings import settings
 
-logger = logging.getLogger("voice_handler")
+logger = logging.getLogger("anita.voice")
 
 # Structured call-event timeline (Phase 0 observability): every line is
 #   EVENT <call_id> turn=<n> <NAME> [key=value ...]
 # so a call can be reconstructed end-to-end from the log.
-voice_events = logging.getLogger("voice_events")
+voice_events = logging.getLogger("anita.voice.events")
 
 # ── Lazy-loaded models (shared across all sessions) ───────────────────
 
@@ -77,7 +77,7 @@ def _get_stt_model():
     logger.info(f"Loading faster-whisper {_STT_MODEL_SIZE} on {device} ({compute_type})...")
     # WHISPER_NUM_THREADS is sized per machine by scripts/predeploy.py.
     # Note: pipecat's WhisperSTTSettings has no cpu_threads param, so this
-    # applies to the voice_handler STT path only.
+    # applies to the ANITA voice STT path only.
     _stt_model = WhisperModel(
         _STT_MODEL_SIZE,
         device=device,
@@ -338,37 +338,26 @@ def load_call_asset_ulaw(name: str) -> list[bytes] | None:
     return [pcm_to_ulaw(pcm[i:i + chunk]) for i in range(0, len(pcm), chunk)]
 
 
-def generate_ulaw_greeting(text: str) -> list[bytes]:
-    """
-    Quick TTS → µ-law chunker for use in WebSocket start handlers.
-
-    Returns a list of µ-law byte chunks ready for Twilio Media Streams.
-    """
-    kokoro = _get_tts_engine()
-    audio, sr = kokoro.create(text, voice=_tts_voice(), speed=_tts_speed())
-    from scipy.signal import resample
-
-    target_len = int(len(audio) * 8000 / 24000)
-    audio_8k = resample(audio, target_len)
-    audio_8k_int16 = (audio_8k * 32767).clip(-32768, 32767).astype(np.int16)
-    chunk_size = 160
-    chunks = []
-    for i in range(0, len(audio_8k_int16), chunk_size):
-        chunk = audio_8k_int16[i : i + chunk_size]
-        if len(chunk) < chunk_size:
-            chunk = np.pad(chunk, (0, chunk_size - len(chunk)))
-        chunks.append(pcm_to_ulaw(chunk.tobytes()))
-    return chunks
+# NOTE (CL-8): the source's `generate_ulaw_greeting()` lived here. It
+# pre-synthesised the greeting that the source's `app/main.py` played from a
+# WebSocket start handler — ANITA greets through TwiML `<Say>` instead, was
+# never called by anything in this repo, and is recorded as a deliberate
+# removal in tests/test_mod05_voice_migration.py (DELIBERATE_GONE).
 
 
 # ── VoiceCallSession — runs the full AI pipeline per utterance ────────
 
+#: Assistant phrasings that ask the caller to pin down a product or an order.
+#: This is the signal the deterministic loop-breaker counts — "the assistant
+#: has asked for clarification twice in a row" — so it matches ANITA's
+#: catalogue vocabulary rather than the admissions vocabulary the engine was
+#: copied with (work-status §10, CL-3). The generic lead-ins ("could you
+#: specify", "did you mean") are domain-neutral and stay.
 _CLARIFICATION_RE = re.compile(
-    r"(which (specific )?(program|course|intake|semester|term)|"
-    r"what (program|course|intake|semester|term)|could you (please )?"
-    r"(specify|clarify|tell me)|did you mean|just to confirm|"
-    r"are you (looking|asking|interested|referring|planning)|"
-    r"fall,? ?spring)",
+    r"(which (specific )?(product|model|item|variant|version|one|size|pack)|"
+    r"what (product|model|item|variant|version|quantity|size)|"
+    r"could you (please )?(specify|clarify|tell me)|did you mean|just to confirm|"
+    r"are you (looking|asking|interested|referring|planning))",
     re.IGNORECASE,
 )
 
@@ -552,7 +541,7 @@ CALL_CAP_REPLY = (
 _META_MARKERS = (
     "based on",
     "here's the relevant",
-    "university profile",
+    "catalogue profile",
     "the caller",
     "asked for clarification",
     "let's assume",
@@ -566,8 +555,8 @@ _META_MARKERS = (
 
 
 #: Meta lead-in glued directly to real content ("Here's the relevant
-#: information from the university profile: The MBA is…") — strip the
-#: prefix so the real content survives.
+#: information from the catalogue profile: Ultrasound Gel is listed at
+#: ₹60/Piece.") — strip the prefix so the real content survives.
 _PREFIX_STRIP = re.compile(
     r"^here'?s the relevant information\b[^:\n]*[:：]\s*", re.IGNORECASE
 )
@@ -601,7 +590,13 @@ CLOSING_PHRASES_RE = re.compile(
 )
 
 #: Fixed closing line for the deterministic hangup path.
-CLOSING_REPLY = "Thank you for calling Meridian University Admissions. Have a great day!"
+#:
+#: This is spoken on every sign-off — "bye", "goodbye", "see you", "that's
+#: all" — so it names the product to every caller who hangs up politely. It
+#: previously named the sibling product this engine was copied from, which
+#: meant ANITA callers were thanked by a university admissions office
+#: (work-status §10, CL-1).
+CLOSING_REPLY = "Thank you for calling ANITA Medical Systems. Have a great day!"
 
 
 def is_closing_phrase(text: str) -> bool:
@@ -629,8 +624,8 @@ def _split_sentences(text: str) -> list[str]:
     sentence's audio exists while later ones are still being synthesised.
 
     Conservative split: only on `.` `!` `?` `;` followed by whitespace and a
-    capital letter, and never right after a digit -- so a price like
-    "$1,700. Scholarships" stays intact while real sentence boundaries
+    capital letter, and never right after a digit -- so a figure like
+    "₹2,500. Shipping extra" stays intact while real sentence boundaries
     split. (An abbreviation like "Dr. Smith" still splits into two synthesis
     chunks; that costs a clause boundary of silence, never correctness --
     and US-004's clause cutter replaces this splitter when it lands.)
@@ -681,6 +676,12 @@ class VoiceCallSession:
         self._max_call_seconds = _max_call_seconds()
         self._capped = False
         self.call_id = ""       # set by the WS handler (stream_sid)
+        # US-004: who is calling, when the carrier tells us, and which channel
+        # this session actually is. Both are set by the relay that owns the
+        # socket — the media stream sets a phone number, the browser relay
+        # marks the session as browser_mic. Defaults describe a PSTN call.
+        self.caller = ""
+        self.channel_kind = "voice_inbound"
 
         # US-012: the per-call TTS cache. Unused while TTS_CACHE_SCOPE is
         # "shared" (the DG-06 default), where every session reads and writes the
@@ -711,7 +712,7 @@ class VoiceCallSession:
         #: noise floor can be applied knowingly (see `process_utterance`).
         self._turn_began_as_interruption = False
         #: US-004's cancel signal, produced here rather than left unwired. The
-        #: chain below it (rag.query_rag_stream -> llm_backend.generate_stream)
+        #: chain below it (anita.voice_rag.query_rag_stream -> anita.voice_llm)
         #: has always consumed one; nothing ever made one, so `cancel` was
         #: permanently None and `GenerationCancelled` was unreachable.
         self._cancel: asyncio.Event | None = None
@@ -725,6 +726,10 @@ class VoiceCallSession:
 
         # US-001 turn tracing (app/perf_trace.py). Never raises; may be None.
         self._trace = None
+        #: US-017: did this turn's answer reach the caller clause by clause?
+        #: On the streamed path the history already holds only what was heard,
+        #: so a barge-in must not add a "not fully heard" marker to it.
+        self._spoke_streamed = False
 
     def log_event(self, name: str, **fields) -> None:
         """Emit one structured event line for the call timeline."""
@@ -850,7 +855,14 @@ class VoiceCallSession:
         an answer the caller is still waiting for, and will refuse to repeat it.
 
         Idempotent, and a no-op when the last entry is not an answer.
+
+        US-017: also a no-op on the streamed path, where `_query_llm_streamed`
+        writes only the clauses that were actually spoken — marking that entry
+        "not fully heard" would claim the caller missed something the assistant
+        never said.
         """
+        if self._spoke_streamed:
+            return
         if not self._conversation_history:
             return
         last = self._conversation_history[-1]
@@ -1086,6 +1098,23 @@ class VoiceCallSession:
     def mark_capped(self) -> None:
         """Record that the ceiling has been announced, so it is said once."""
         self._capped = True
+
+    def finish_trace(self, *, outcome: str = "answered") -> None:
+        """Emit this turn's trace and clear it. Best-effort: never raises.
+
+        The media relay calls this when a turn resolves — normally, on a
+        barge-in cancellation, and on failure — so every turn that reached
+        end-of-speech leaves a record regardless of how it ended.
+        """
+        trace, self._trace = self._trace, None
+        if trace is None:
+            return
+        try:
+            from .voice_trace import emit_trace
+
+            emit_trace(trace, outcome=outcome)
+        except Exception:  # noqa: BLE001 - a trace must never affect the call
+            pass
 
     def is_silent(self, ulaw_chunk: bytes) -> bool:
         """
@@ -1407,27 +1436,49 @@ class VoiceCallSession:
         # ── Step 5: PCM → µ-law chunks (320 samples = 20 ms at 16 kHz) ──
         return _turn_outcome(self._pcm_to_ulaw_chunks(tts_pcm)), dialogue, False
 
-    # ── Domain dictionary for phone audio corrections ──────────────
+    # ── Catalogue dictionary for phone audio corrections ───────────
 
+    #: STT mis-hearings of ANITA's own vocabulary on phone audio.
+    #:
+    #: Every *target* is vocabulary from this product's own catalogue —
+    #: product names and brands from `data/out/ams.sqlite`, plus the company
+    #: name — and `test_every_correction_target_is_catalogue_vocabulary`
+    #: asserts it against the corpus at test time. That invariant is the
+    #: point: this table previously held the sibling product's admissions
+    #: vocabulary (`emma`→`MBA`, `intuition`→`tuition`, `maridian`→
+    #: `Meridian`), so ANITA callers had their transcripts rewritten into
+    #: another product's language (work-status §10, CL-2).
     _CORRECTIONS = {
-        # Meridian-name corrections (common STT mis-hearings on phone audio)
-        "maridian": "Meridian", "miridian": "Meridian", "meridien": "Meridian",
-        "mary dian": "Meridian",
-        # Generic admissions terms (valid for Meridian)
-        "intuition": "tuition", "faze": "fees",
-        "emma": "MBA", "gp a": "GPA", "i elts": "IELTS",
-        "toefl": "TOEFL", "jimat": "GMAT", "g mat": "GMAT",
+        "x ray": "X-Ray",
+        "ex ray": "X-Ray",
+        "ultra sound": "Ultrasound",
+        "ultra-sound": "Ultrasound",
+        "fuji film": "FUJIFILM",
+        "f c r": "FCR",
+        "capsule a": "Capsula",
+        "pro fect": "Profect",
+        "micro bar": "Microbar",
+        "intensive flying": "Intensifying",
+        "cath-lab": "Cath Lab",
+        "annita": "ANITA",
     }
 
     def _post_process_transcript(self, text: str) -> str:
-        """Apply domain corrections to fix common STT errors on phone audio."""
+        """Apply catalogue corrections to fix common STT errors on phone audio.
+
+        Matched on **word boundaries** and escaped. A mis-hearing is a spoken
+        word, so a key must not fire inside a longer word that merely contains
+        it — the substring behaviour of the previous implementation is how a
+        stray `emma` could rewrite an unrelated name.
+        """
         result = text
-        text_lower = result.lower()
         for wrong, correct in self._CORRECTIONS.items():
-            if wrong in text_lower:
-                # Case-insensitive replacement
-                import re
-                result = re.sub(wrong, correct, result, flags=re.IGNORECASE)
+            result = re.sub(
+                r"\b" + re.escape(wrong) + r"\b",
+                correct,
+                result,
+                flags=re.IGNORECASE,
+            )
         return result.strip()
 
     # ── Internal ──────────────────────────────────────────────────
@@ -1509,7 +1560,7 @@ class VoiceCallSession:
 
             # US-001: llm_sent brackets retrieval + prefill + generation. The
             # split between those three comes from the engine counters captured
-            # in app/llm_backend.py and the retrieval_done mark from app/rag.py.
+            # in anita.voice_llm and the retrieval_done mark from anita.voice_rag.
             # llm_first_token is deliberately NOT marked here: with a
             # non-streaming call there is no first-token event, and marking this
             # instant would fabricate a TTFT (TRD-21).
@@ -1522,7 +1573,8 @@ class VoiceCallSession:
             # is recorded against this call's conversation rather than a
             # process-wide one.
             answer = await asyncio.to_thread(
-                run_rag_query_sync, prompt, "voice", question, self.call_id
+                run_rag_query_sync, prompt, "voice", question, self.call_id,
+                caller=self.caller, channel_kind=self.channel_kind,
             ) or ""
             if self._trace is not None:
                 self._trace.mark("llm_done")
@@ -1550,6 +1602,10 @@ class VoiceCallSession:
             from .voice_llm import ClauseCutter, GenerationCancelled, GenerationFailed
             from .voice_rag import query_rag_stream
 
+            # US-017: this is the clause-by-clause path, so a barge-in here
+            # leaves a history that already matches what the caller heard.
+            self._spoke_streamed = chunk_sink is not None
+
             prompt = self._build_llm_prompt(question)
             cutter = ClauseCutter()
             parts: list[str] = []
@@ -1569,6 +1625,22 @@ class VoiceCallSession:
                 if chunk_sink is None:
                     return
                 frames = await self._synthesise_streamed(scrubbed, chunk_sink)
+                if frames is None:
+                    # AC-4: a clause that fails to synthesise gets one retry,
+                    # and a second failure speaks the human-transfer offer
+                    # rather than leaving the caller in silence.
+                    self.log_event("TTS_CLAUSE_RETRY")
+                    logger.warning("VoiceCall: clause synthesis failed — retrying once")
+                    frames = await self._synthesise_streamed(scrubbed, chunk_sink)
+                if frames is None:
+                    self.log_event("TTS_CLAUSE_FALLBACK")
+                    logger.error(
+                        "VoiceCall: clause synthesis failed twice — speaking the "
+                        "human-transfer offer instead of silence"
+                    )
+                    frames = await self._synthesise_streamed(
+                        HUMAN_TRANSFER_REPLY, chunk_sink
+                    )
                 if frames:
                     chunks.extend(frames)
                     any_audio = True
@@ -1579,6 +1651,7 @@ class VoiceCallSession:
                 async for item in query_rag_stream(
                     prompt, cancel=cancel, retrieval_query=question,
                     session_key=self.call_id,
+                    caller=self.caller, channel_kind=self.channel_kind,
                 ):
                     if isinstance(item, str):
                         if first_delta:
@@ -1591,6 +1664,15 @@ class VoiceCallSession:
                         # returned Clause objects, so this read `clause.text`
                         # and every clause would have raised AttributeError.
                         for clause in cutter.feed(item):
+                            if cancel is not None and cancel.is_set():
+                                # US-017: the caller cut in. Stop before the
+                                # next clause — the remaining clauses were
+                                # already decoded, and speaking them is exactly
+                                # the "finish the sentence" behaviour barge-in
+                                # exists to remove. Raising the engine's own
+                                # cancellation lands in the handler below, so
+                                # the tail is not flushed either.
+                                raise GenerationCancelled()
                             await _speak_clause(clause)
                     else:
                         counters = item
@@ -1639,7 +1721,14 @@ class VoiceCallSession:
             return "", []
 
     def _build_llm_prompt(self, question: str) -> str:
-        """The prompt the serving path sends (shared by batch and stream)."""
+        """The prompt the serving path sends (shared by batch and stream).
+
+        Catalogue vocabulary only. This text is assembled on every turn and
+        was — until CL-5 — the sibling product's admissions prompt; it is
+        inert today only because `voice_pipeline.run_rag_query_sync` answers
+        the *question*, not the prompt. US-014 wires the prose leg, at which
+        point every sentence here reaches a model.
+        """
         # Include recent conversation for context
         if self._conversation_history:
             context = "\n".join(self._conversation_history[-6:])
@@ -1647,12 +1736,12 @@ class VoiceCallSession:
                 f"This is an {self.direction} call.\n"
                 f"Previous conversation:\n{context}\n\n"
                 f"The caller just said: \"{question}\"\n"
-                f"Answer naturally as a university admissions advisor. "
-                f"Keep responses concise for voice (under 3 sentences). "
-                f"NEVER ask the same or similar clarifying question twice "
-                f"in a row. If the caller repeats a similar answer, STOP "
-                f"asking — state your best interpretation and answer with "
-                f"concrete information from the university profile, then "
+                f"Answer naturally as a catalogue assistant for medical "
+                f"equipment. Keep responses concise for voice (under 3 "
+                f"sentences). NEVER ask the same or similar clarifying "
+                f"question twice in a row. If the caller repeats a similar "
+                f"answer, STOP asking — state your best interpretation and "
+                f"answer with concrete information from the catalogue, then "
                 f"invite the caller to correct you."
             )
             # Deterministic loop-breaker: if the assistant's own last
@@ -1679,9 +1768,9 @@ class VoiceCallSession:
                     f"\n\nThe caller just said: \"{question}\"\n"
                     f"You have already asked for clarification too many "
                     f"times. Do NOT ask any question. Answer now with "
-                    f"concrete program information from the university "
-                    f"profile — duration, fees, eligibility — and let "
-                    f"the caller correct you."
+                    f"concrete product information from the catalogue — "
+                    f"model, specifications, price — and let the caller "
+                    f"correct you."
                 )
         else:
             prompt = f"This is an {self.direction} call.\n{question}"
@@ -1869,8 +1958,15 @@ class VoiceCallSession:
             # will replace this splitter when it lands; the stream interface
             # here does not change).
             for sentence in _split_sentences(tts_text):
+                if self.cancel_requested():
+                    # US-017: stop *producing*. The consumer stops sending on
+                    # the same signal; this stops the synthesiser doing work
+                    # nobody will hear. A partial is never cached.
+                    return
                 async for audio, sr in kokoro.create_stream(
                         sentence, voice=voice, speed=speed):
+                    if self.cancel_requested():
+                        return
                     if first:
                         first = False
                         self.log_event("TTS_FIRST_CHUNK", samples=int(len(audio)))
@@ -1918,6 +2014,14 @@ class VoiceCallSession:
         any_audio = False
         try:
             async for audio, sr in self.synthesise_stream(text):
+                if self.cancel_requested():
+                    # US-017: a barge-in mid-clause. Stop sending audio now
+                    # rather than finishing the sentence the caller
+                    # interrupted; nothing is cached, because a partial is not
+                    # the answer. The relay separately sends Twilio a `clear`
+                    # so what is already buffered stops playing too.
+                    self.log_event("TTS_CANCELLED", chunks=len(chunks))
+                    return chunks if any_audio else None
                 any_audio = True
                 frames = self._chunk_to_ulaw_frames(audio, sr)
                 chunks.extend(frames)

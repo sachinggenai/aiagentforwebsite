@@ -431,3 +431,156 @@ class TestFactSelection:
 
         assert FACT_REGISTRY[FactKind.PRICE].needs_caveat
         assert FACT_REGISTRY[FactKind.PRICE].is_commercial
+
+
+# ---------------------------------------------------------------------------
+# US-014 / US-015 — the prose leg, and the model being down
+# ---------------------------------------------------------------------------
+class _Chunk:
+    def __init__(self, text, product_id="p1", product_name="Ultrasound Gel",
+                 source_url="https://example.test/gel", chunk_type="product_about"):
+        self.text = text
+        self.product_id = product_id
+        self.product_name = product_name
+        self.source_url = source_url
+        self.chunk_type = chunk_type
+
+
+class _Retriever:
+    """The minimum `answer()` touches: retrieve() with a decision."""
+
+    def __init__(self, chunks):
+        from types import SimpleNamespace
+
+        self._result = SimpleNamespace(
+            ok=True,
+            chunks=[SimpleNamespace(chunk=chunk) for chunk in chunks],
+            decision=SimpleNamespace(entity_matched=True),
+        )
+
+    def retrieve(self, message):
+        return self._result
+
+
+class _Llm:
+    """Records what it was asked; answers with whatever it was told to."""
+
+    def __init__(self, text="", *, raises=None):
+        self._text = text
+        self._raises = raises
+        self.calls = []
+
+    def generate(self, messages, *, stream=True):
+        from types import SimpleNamespace
+
+        self.calls.append(messages)
+        if self._raises is not None:
+            raise self._raises
+        return SimpleNamespace(text=self._text)
+
+
+def _wrapped(text):
+    """The shape `answer()` passes around: retrieval results wrap the chunk."""
+    from types import SimpleNamespace
+
+    return [SimpleNamespace(chunk=_Chunk(text))]
+
+
+class TestUS014ProseLeg:
+    CONTEXT = "Ultrasound Gel is a coupling medium. List price 60 per piece."
+
+    def _engine(self, llm, *, retriever=None):
+        from anita.answer_engine import AnswerEngine
+
+        return AnswerEngine(
+            answers=None,
+            retriever=retriever or _Retriever([_Chunk(self.CONTEXT)]),
+            leads=None,
+            llm=llm,
+        )
+
+    def _conversation(self):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(turns=[], conversation_id="c1", lead_id="")
+
+    def test_no_backend_means_no_change(self):
+        engine = self._engine(None)
+        assert engine._compose_prose("what is it for", _wrapped(self.CONTEXT), self._conversation()) is None
+
+    def test_grounded_prose_is_accepted_and_carries_the_context(self):
+        llm = _Llm("The gel is a coupling medium used for imaging. List price 60 per piece, and a formal quotation is required for an order.")
+        engine = self._engine(llm)
+
+        prose = engine._compose_prose("what is it for", _wrapped(self.CONTEXT), self._conversation())
+
+        assert prose is not None and "coupling medium" in prose
+        sent = "\n".join(message["content"] for message in llm.calls[0])
+        assert self.CONTEXT in sent, "the prompt must carry the chunks the answer is checked against"
+
+    def test_a_fabricated_figure_is_rejected(self):
+        """The control that matters: a number not in the context cannot ship."""
+        llm = _Llm("The gel costs 2500 per piece. A formal quotation is required.")
+        engine = self._engine(llm)
+
+        assert engine._compose_prose("price?", _wrapped(self.CONTEXT), self._conversation()) is None
+
+    def test_a_quotation_missing_its_caveat_is_rejected(self):
+        llm = _Llm("The gel is a coupling medium; the list price is 60 per piece.")
+        engine = self._engine(llm)
+
+        assert engine._compose_prose("price?", _wrapped(self.CONTEXT), self._conversation()) is None
+
+    def test_a_dead_model_falls_back_and_never_raises(self):
+        """US-015: the breaker is open, the generation raises, the turn lives."""
+        from anita.llm import LLMError
+
+        engine = self._engine(_Llm(raises=LLMError("circuit open")))
+        assert engine._compose_prose("what is it for", _wrapped(self.CONTEXT), self._conversation()) is None
+
+    def test_the_engine_answers_verbatim_when_the_model_is_down(self):
+        """End to end through `answer()`: the deterministic answer stands."""
+        from anita.llm import LLMError
+        from anita.orchestrator import Intent
+
+        engine = self._engine(_Llm(raises=LLMError("circuit open")))
+        reply = engine.answer(Intent.CATALOGUE, "what does the gel do", self._conversation())
+
+        assert "coupling medium" in reply.text, "verbatim chunk text still answers"
+        assert reply.grounded is True
+
+    def test_the_fall_through_uses_grounded_prose_when_it_there_is(self):
+        from anita.orchestrator import Intent
+
+        engine = self._engine(_Llm("prose from the model"))
+        engine._compose_prose = lambda *_args, **_kwargs: "prose from the model"
+
+        reply = engine.answer(Intent.CATALOGUE, "what does the gel do", self._conversation())
+
+        assert reply.text == "prose from the model"
+
+    def test_a_decline_never_reaches_the_model(self):
+        from anita.orchestrator import Intent
+
+        from types import SimpleNamespace
+
+        llm = _Llm("should not be used")
+        missing = SimpleNamespace(
+            retrieve=lambda message: SimpleNamespace(
+                ok=False, chunks=[], decision=SimpleNamespace(entity_matched=False)
+            )
+        )
+        engine = self._engine(llm, retriever=missing)
+
+        reply = engine.answer(Intent.OFF_TOPIC, "who won the world cup", self._conversation())
+
+        assert llm.calls == [], "a refusal is not an open question"
+        assert reply.declined is True
+
+    def test_the_backend_default_keep_alive_carries_its_unit(self):
+        """Ollama answers a bare "-1" with HTTP 400 on *every* request
+        ("time: missing unit in duration"), which reads as a model fault."""
+        from anita.llm import OllamaBackend
+
+        backend = OllamaBackend("http://127.0.0.1:11434", "any-model")
+        assert backend.keep_alive[-1].isalpha(), backend.keep_alive

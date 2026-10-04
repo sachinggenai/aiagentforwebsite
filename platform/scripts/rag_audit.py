@@ -99,9 +99,9 @@ def main() -> int:
 
     # -- 3. embedding ------------------------------------------------------
     print("\n3. EMBEDDING — are all chunks in the vector store?")
-    from anita.assembly import assemble
+    from anita.assembly import assemble, deployed_environment
 
-    built = assemble(require_preflight=False)
+    built = assemble(require_preflight=False, env=deployed_environment())
     chat = built.chat
     retriever = chat.retriever
     if retriever is None:

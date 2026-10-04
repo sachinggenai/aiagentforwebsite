@@ -194,10 +194,13 @@ def _phase_platform(settings: AnitaSettings) -> PhaseResult:
         f"voice_capable={model.voice_capable} — {device.reason}"
     )
     if not model.voice_capable:
-        # Not a refusal: chat and WhatsApp work fine without a GPU. Voice will
-        # be refused at admission instead (US-018), which is the designed
-        # degradation rather than a startup failure.
-        detail += " (voice will be refused at admission)"
+        # Not a refusal: chat and WhatsApp work fine without a GPU, and voice
+        # still works — it is **capped** at what one CPU can honour (US-018).
+        # This used to say "voice will be refused at admission", which no code
+        # implemented: a torch-less host admitted calls as if it had a GPU.
+        from .speech import CPU_CONCURRENT_CALLS
+
+        detail += f" (voice capped at {CPU_CONCURRENT_CALLS} concurrent call(s))"
     return PhaseResult(
         "PLATFORM",
         True,
@@ -240,6 +243,49 @@ def _phase_data(settings: AnitaSettings) -> PhaseResult:
     except OSError:
         pass
     return PhaseResult("DATA", True, f"corpus ok ({lines} chunks)", data={"chunks": lines})
+
+
+def _phase_index(settings: AnitaSettings) -> PhaseResult:
+    """The index must exist before the platform serves (`SM-05`, US-010).
+
+    `ABSENT` used to be a startup *note* — the platform booted, and every
+    catalogue answer became a decline, which is a working product telling
+    buyers it does not stock things it does stock. The story's edge case 1 is
+    explicit that this refuses boot, and the refusal is only acceptable because
+    it is actionable: the message names the command that fixes it.
+
+    Read-only: it opens the build store only if the file already exists, and
+    never creates one — a boot that writes the state it is checking would make
+    a fresh deployment look like it had a build history.
+    """
+    from .index import live_collection_name
+
+    chroma = (settings.project_root / settings.isolation.chroma_path).resolve()
+    store_path = (
+        (settings.project_root / settings.isolation.log_dir).resolve() / "anita_index.sqlite"
+    )
+    live = live_collection_name(store_path, "")
+    has_vectors = chroma.exists() and any(chroma.iterdir())
+
+    if live:
+        return PhaseResult("INDEX", True, f"live collection {live}")
+    if has_vectors:
+        # Vectors without a promoted build: a pre-lifecycle index, still
+        # serving. Allowed, and said out loud so "no build history" is not
+        # mistaken for "no index".
+        return PhaseResult(
+            "INDEX", True,
+            f"{settings.isolation.chroma_collection} present, no promoted build yet "
+            f"(run scripts/rebuild_index.py to record one)",
+        )
+
+    return PhaseResult("INDEX", False, "no index", [
+        "NO_INDEX: no built index and no promoted build for this instance.",
+        "Run: .venv\\Scripts\\python scripts\\rebuild_index.py",
+        "The platform refuses to serve an empty index: every catalogue answer "
+        "would be a decline, and a working product would tell buyers it does "
+        "not stock what it stocks.",
+    ])
 
 
 def _phase_warm(settings: AnitaSettings) -> PhaseResult:
@@ -302,6 +348,7 @@ def preflight(
     report.phases.append(_phase_secrets(settings))
     report.phases.append(_phase_platform(settings))
     report.phases.append(_phase_data(settings))
+    report.phases.append(_phase_index(settings))
     report.phases.append(_phase_warm(settings))
     return report
 

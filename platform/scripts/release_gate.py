@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -43,13 +44,43 @@ for stream in (sys.stdout, sys.stderr):
 E2E_DIR = PLATFORM / "tests" / "e2e"
 REPORT_PATH = PLATFORM.parent / "data" / "out" / "reports" / "release-gate.json"
 
+#: Where the browser suite expects a running instance. `run.sh` starts
+#: Streamlit here; `ANITA_E2E_URL` points the suite at a different one.
+DEFAULT_E2E_PORT = "8085"
+
+
+def instance_url() -> str:
+    return os.environ.get(
+        "ANITA_E2E_URL", f"http://127.0.0.1:{os.environ.get('ANITA_E2E_PORT', DEFAULT_E2E_PORT)}"
+    ).rstrip("/")
+
+
+def instance_is_up(url: str | None = None, *, timeout: float = 2.0) -> bool:
+    """True when something is serving the instance's health endpoint.
+
+    The browser suite drives a *running instance*, and the gate used to run it
+    blind. With nothing listening, Playwright's first test hit
+    `ERR_CONNECTION_REFUSED`, the serial spec skipped the other 49, and the
+    gate reported `1 scenario failed` — blaming the product for an environment
+    problem, which is the exact confusion this script exists to prevent
+    (work-status §8.19).
+    """
+    import urllib.request
+
+    target = f"{(url or instance_url())}/_stcore/health"
+    try:
+        with urllib.request.urlopen(target, timeout=timeout) as response:
+            return 200 <= response.status < 300
+    except Exception:  # noqa: BLE001 - unreachable in any way is unreachable
+        return False
+
 
 def run_evaluation_set() -> tuple[object, dict]:
     """The in-process evaluation set. Returns (GateReport, validation dict)."""
-    from anita.assembly import assemble
+    from anita.assembly import assemble, deployed_environment
     from anita.observability import cases_from_corpus
 
-    built = assemble(require_preflight=False)
+    built = assemble(require_preflight=False, env=deployed_environment())
     chat = built.chat
     if chat.retriever is not None:
         try:
@@ -71,7 +102,30 @@ def run_evaluation_set() -> tuple[object, dict]:
             message=case.question, session_id=f"gate-{case.case_id}"
         ).body.get("text", "")
     )
-    return report, report.as_dict()
+
+    # US-012, `TAC-1`/`TAC-2`: a grounded answer with no citation, or a
+    # citation that could not be completed, is a composition defect — and the
+    # only way to know is to look at every reply the frozen set produced. The
+    # gate above sees text; this sees provenance.
+    integrity = {"grounded": 0, "uncited": 0, "incomplete": 0}
+    try:
+        for case in gate.cases:
+            body = chat.post_message(
+                message=case.question, session_id=f"gate-cite-{case.case_id}"
+            ).body
+            if not body.get("grounded"):
+                continue
+            integrity["grounded"] += 1
+            if not body.get("grounded_on"):
+                integrity["uncited"] += 1
+            if body.get("citation_incomplete"):
+                integrity["incomplete"] += 1
+    except Exception as exc:  # noqa: BLE001 - an integrity run that broke is not a pass
+        integrity["error"] = f"{type(exc).__name__}: {exc}"
+
+    validation = report.as_dict()
+    validation["citations"] = integrity
+    return report, validation
 
 
 def run_browser_suite(project: str | None = None) -> "BrowserReport":
@@ -82,6 +136,17 @@ def run_browser_suite(project: str | None = None) -> "BrowserReport":
         return BrowserReport(
             passed=False, total=0,
             reason=f"Playwright is not installed in {E2E_DIR} — run `npm install`",
+        )
+
+    url = instance_url()
+    if not instance_is_up(url):
+        return BrowserReport(
+            passed=False, total=0,
+            reason=(
+                f"no instance on {url} — this is an environment problem, not a "
+                f"product failure. Start one (`bash tests/e2e/run.sh`) or point "
+                f"ANITA_E2E_URL at a running instance, then re-run the gate."
+            ),
         )
 
     command = ["npx", "playwright", "test", "--reporter=json"]
@@ -211,11 +276,26 @@ def main(argv: list[str] | None = None) -> int:
     from anita.observability import combine_validation
 
     print("\n1. Evaluation set (in-process)")
-    gate_report, _ = run_evaluation_set()
+    gate_report, gate_validation = run_evaluation_set()
     status = "PASS" if gate_report.passed else "FAIL"
     print(f"   [{status}] {gate_report.total} cases — {gate_report.reason or 'ok'}")
     for case_id in gate_report.failed_ids[:10]:
         print(f"          failed: {case_id}")
+
+    # US-012: 100 % of grounded answers must cite something, and no citation
+    # may be incomplete. Both counts are printed even at zero — a check that
+    # only speaks when it fails cannot be told from one that never ran.
+    citations = gate_validation.get("citations", {})
+    if citations:
+        cite_ok = not (citations.get("uncited") or citations.get("incomplete")
+                       or citations.get("error"))
+        cite_status = "PASS" if cite_ok else "FAIL"
+        print(f"   [{cite_status}] citation integrity — "
+              f"{citations.get('grounded', 0)} grounded answers, "
+              f"{citations.get('uncited', 0)} uncited, "
+              f"{citations.get('incomplete', 0)} incomplete")
+        if citations.get("error"):
+            print(f"          {citations['error']}")
 
     browser_report = None
     if args.no_browser:
@@ -224,7 +304,13 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print("\n2. Browser suite (Playwright)")
         browser_report = run_browser_suite(args.project)
-        status = "PASS" if browser_report.passed else "FAIL"
+        # A suite that never ran is not a failed suite. The verdict below still
+        # refuses promotion (an unrun suite is not evidence), but the line must
+        # not read as a product failure.
+        if browser_report.total == 0:
+            status = "NOT RUN"
+        else:
+            status = "PASS" if browser_report.passed else "FAIL"
         print(f"   [{status}] {browser_report.total} scenarios in "
               f"{browser_report.duration_s:.0f}s — {browser_report.reason or 'ok'}")
         for title in list(browser_report.failed)[:10]:

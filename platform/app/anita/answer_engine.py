@@ -29,8 +29,11 @@ price) holding structurally rather than by prompt discipline.
 
 from __future__ import annotations
 
+import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+logger = logging.getLogger("anita.answer_engine")
 
 
 # ---------------------------------------------------------------------------
@@ -51,6 +54,34 @@ class ChatReply:
     # and a client that reads that as "declined" tells the buyer the assistant
     # refused when it answered.
     declined: bool = False
+    # US-012: every catalogue fact the answer used, as citations
+    # (`chunk_id` / `source_url` / `chunk_type` / content hash where a chunk is
+    # involved, the record id where a corpus row is). The reply that states a
+    # figure without one is a composition defect, so the count is part of the
+    # payload rather than a claim in a docstring.
+    grounded_on: list[dict] = field(default_factory=list)
+    #: True when a citation could not be completed (a chunk with no
+    #: `source_url`). Counted rather than swallowed — the release gate fails on
+    #: a non-zero count over the frozen set (`TAC-1`).
+    citation_incomplete: bool = False
+
+    def cite(self, citation: dict | None) -> None:
+        """Attach one citation, flagging an incomplete one.
+
+        A *record* citation (`company:branches`, `product:270694`) is complete
+        by construction — the record id is what resolves it, and the story asks
+        for exactly that for statutory facts (`TAC-6`). The incomplete flag is
+        for a **chunk** citation with no `source_url`: the answer was composed
+        from a retrieved passage whose provenance is a dead end, which is the
+        condition the release gate must fail on (`TAC-1`, edge 10).
+        """
+        if not citation:
+            return
+        self.grounded_on.append(citation)
+        if str(citation.get("chunk_type") or "") in ("product_record", "company_record"):
+            return
+        if not citation.get("source_url"):
+            self.citation_incomplete = True
 
     def as_dict(self) -> dict:
         return {
@@ -62,6 +93,8 @@ class ChatReply:
             "source_url": self.source_url,
             "unavailable": self.unavailable,
             "declined": self.declined,
+            "grounded_on": self.grounded_on,
+            "citation_incomplete": self.citation_incomplete,
         }
 
 
@@ -113,6 +146,57 @@ _COMPARE_RE = re.compile(
     r"\b(compare|comparison|difference|differences|differ|versus|vs\.?|"
     r"which is better|better than)\b", re.I,
 )
+
+
+#: Words that ask a commercial question without naming anything to ask it
+#: about. A message made only of these (plus stopwords) is a follow-up —
+#: "and the price?", "what about the MOQ?" — and may be answered from the
+#: product the conversation was already about. The list is deliberately
+#: generous: an unrecognised word here costs a wrong answer about the wrong
+#: product, while omitting one only costs a decline.
+_FOLLOW_UP_WORDS = frozenset("""
+what whats whatever and the for of is are was were it that this these those about again
+please tell give show me my your you we us i do does did done how much many price pricing
+cost rate quote quotation discount moq minimum order ordering quantity delivery lead time
+shipping supply ability sample available availability payment invoice unit units piece
+pieces box boxes pack packs buy purchase sell selling have has had any there on in to a an
+can could would should will give get need want more also same one that's whats and/or
+""".split())
+_WORD_RE = re.compile(r"[a-z0-9]+")
+
+# What a question is asking about, for the absence check. Specific first: a
+# question that mentions both ("tell me about the specifications") is a
+# specification question.
+_SPEC_ASK = re.compile(
+    r"\b(specificat\w*|specs?|technical (details|data|specs?)|"
+    r"what (does|do) (it|they|the .*?) weigh|weight|dimensions?|"
+    r"materials?|size|colou?r|models?|features?)\b", re.I)
+_ABOUT_ASK = re.compile(
+    r"\b(tell me about|about the|more about|describe|description|overview|"
+    r"what (is|are) (the )?.*\bused for|used for|what does .* do)\b", re.I)
+
+
+def _asked_about(message: str) -> str | None:
+    """``"specs"``, ``"about"``, or None when the question asks for neither."""
+    text = message or ""
+    if _SPEC_ASK.search(text):
+        return "specs"
+    if _ABOUT_ASK.search(text):
+        return "about"
+    return None
+
+
+def _names_no_product(message: str) -> bool:
+    """Whether a message asks a fact question without naming anything.
+
+    Used to decide whether a commercial follow-up may inherit the product the
+    conversation was already about. Any content word outside the fact/filler
+    vocabulary counts as an attempt to name a product — so "the price of the
+    MRI machine you sell" does *not* inherit, and declines as it always did.
+    """
+    words = {word for word in _WORD_RE.findall((message or "").casefold())
+             if len(word) >= 3}
+    return not (words - _FOLLOW_UP_WORDS)
 
 
 def _named(product_name: str, text: str) -> str:
@@ -186,13 +270,23 @@ class AnswerEngine:
     than improvising — the same rule as with one absent.
     """
 
-    def __init__(self, answers=None, retriever=None, leads=None) -> None:
+    def __init__(self, answers=None, retriever=None, leads=None, llm=None,
+                 probe=None) -> None:
         self.answers = answers
         self.retriever = retriever
+        # US-014/US-015: the prose backend, when one is configured. It can only
+        # *add* an answer — every failure path below returns None and leaves
+        # the deterministic or verbatim reply exactly as it was.
+        self.llm = llm
         # MOD-06. Optional: without it the assistant still answers, it just
         # cannot take a lead — and it says so rather than promising a callback
         # it has nowhere to record.
         self.leads = leads
+        # US-012: what the catalogue has published, per product. Optional so an
+        # engine built without a corpus (tests, the voice probe) behaves as it
+        # did; when present it turns "not in our catalogue" into the honest
+        # "not published" for the seven products the source site leaves blank.
+        self.probe = probe
 
     # -- public ------------------------------------------------------------
     def answer(self, intent, message: str, conversation) -> ChatReply:
@@ -273,6 +367,7 @@ class AnswerEngine:
                     )
                     base.grounded = True
                     base.source_url = probe.chunks[0].chunk.source_url
+                    self._cite_chunks(base, probe)
                     base.intent = Intent.CATALOGUE.value
                     return base
             base.text = DECLINE_TEXT
@@ -307,6 +402,18 @@ class AnswerEngine:
                     f"Ask about any one for its specifications, price or delivery time."
                 )
                 base.grounded = product_count.found
+                # US-012: the count and the breakdown are catalogue facts, so
+                # they cite the catalogue. The frozen-set citation check caught
+                # this branch as the one grounded answer with no provenance.
+                if base.grounded:
+                    base.cite({
+                        "chunk_id": "catalogue:products",
+                        "chunk_type": "product_record",
+                        "product_id": None,
+                        "product_name": None,
+                        "source_url": product_count.source_url or None,
+                        "content_hash": "",
+                    })
                 return base
             base.text = product_count.render()
             base.grounded = product_count.found
@@ -325,6 +432,8 @@ class AnswerEngine:
                 base.grounded = answer.found
                 base.source_url = answer.source_url
                 base.unavailable = not answer.found
+                if answer.found:
+                    base.cite(self._company_citation(answer, kind))
                 return base
             # No specific kind — "what brands do you deal in?" lives in the
             # company profile prose, so retrieval gets its turn.
@@ -334,6 +443,7 @@ class AnswerEngine:
                     base.text = result.chunks[0].chunk.text
                     base.grounded = True
                     base.source_url = result.chunks[0].chunk.source_url
+                    self._cite_chunks(base, result)
                     return base
             base.text = DECLINE_TEXT
             base.declined = True
@@ -348,6 +458,17 @@ class AnswerEngine:
             commercial = self._commercial(message, conversation)
             if commercial is not None:
                 return commercial
+
+        # US-012. Checked *before* retrieval, because the honest answer here is
+        # a fact about the catalogue's coverage rather than anything a ranked
+        # chunk could supply — and because retrieval on a product with no
+        # published specifications finds nothing and declines, telling the
+        # buyer we do not stock what we do stock. Composed from the probe, so
+        # the LLM invocation count for this turn is 0 (`TAC-4`).
+        if intent is Intent.CATALOGUE:
+            absence = self._not_published(message, base)
+            if absence is not None:
+                return absence
 
         if self.retriever is None:
             # No retrieval wired: decline rather than let a model improvise.
@@ -365,6 +486,7 @@ class AnswerEngine:
         base.grounded = True
         top = result.chunks[0]
         base.source_url = top.chunk.source_url
+        self._cite_chunks(base, result)
 
         # Comparison. Checked before the single-product path, which would
         # report two matches as ambiguous and ask the buyer to choose between
@@ -377,6 +499,8 @@ class AnswerEngine:
                 base.grounded = answer.found
                 base.source_url = answer.source_url
                 base.unavailable = not answer.found
+                for product in pair:
+                    base.cite(self._product_citation(product))
                 return base
 
         if intent is Intent.CATALOGUE and self.answers is not None:
@@ -435,6 +559,8 @@ class AnswerEngine:
                     return base
                 base.text = self.answers.spec_list(product).text
                 base.source_url = product.url or base.source_url
+                base.grounded = True
+                base.cite(self._product_citation(product))
                 return base
 
             # A catalogue-labelled question that names no catalogue product and
@@ -451,12 +577,62 @@ class AnswerEngine:
                 base.declined = True
                 return base
 
+        # US-014: the one place generated prose is allowed — an open question
+        # whose answer would otherwise be the top chunk verbatim. Everything
+        # above this line is deterministic or name-resolved; nothing here can
+        # replace a figure or a caveat, because the prose is rejected unless
+        # it passes the numeric-grounding check against the same chunks.
+        prose = self._compose_prose(message, result.chunks, conversation)
+        if prose is not None:
+            base.text = prose
+            return base
+
         base.text = top.chunk.text
         if top.chunk.product_name:
             base.text = _named(top.chunk.product_name, base.text)
         return base
 
     # -- helpers -----------------------------------------------------------
+    def _compose_prose(self, question: str, chunks, conversation) -> str | None:
+        """Generated prose for an open question, or None (US-014 / US-015).
+
+        Deterministic-first is the rule of record: this is called only where
+        the reply is otherwise the top chunk verbatim, and **every** failure —
+        no backend, the breaker open, a timeout, an empty generation, or a
+        grounding rejection — returns None and leaves the caller with exactly
+        what it would have said before. The model can add an answer; it can
+        never remove one.
+        """
+        if self.llm is None:
+            return None
+        try:
+            from .prompts import build_prompt, verify_answer
+
+            context = "\n\n".join(chunk.chunk.text for chunk in chunks[:3])
+            history = [
+                {"role": turn.role, "content": turn.content}
+                for turn in list(getattr(conversation, "turns", ()))[-6:]
+            ]
+            bundle = build_prompt(question, context, history=history)
+            result = self.llm.generate(bundle.messages(), stream=False)
+            text = (getattr(result, "text", "") or "").strip()
+            if not text:
+                return None
+
+            # The check is on the OUTPUT, against the same context the prompt
+            # carried: a prompt that says "only use the context" is an
+            # instruction a model can drift from, and this is the control that
+            # stands between a drifted figure and a buyer (BRD-05/BRD-06).
+            check = verify_answer(text, context, question=question, require_caveat=True)
+            if not check.grounded:
+                logger.warning(
+                    "prose rejected by the grounding check: %s", check.violations
+                )
+                return None
+            return text
+        except Exception as exc:  # noqa: BLE001 - the verbatim answer still stands
+            logger.info("prose unavailable (%s); answering verbatim", type(exc).__name__)
+            return None
     def _decline(self) -> str:
         """The decline, with or without the offer of a callback.
 
@@ -478,6 +654,134 @@ class AnswerEngine:
             if turn.role == "assistant":
                 return OFFER_PHRASE in (turn.content or "").lower()
         return False
+
+    def _not_published(self, message: str, base: ChatReply) -> ChatReply | None:
+        """The honest absence, when the asked-about block is not published.
+
+        Returns ``None`` — leaving the normal path to run — when there is no
+        probe, when the question names no product, when the product publishes
+        what was asked for, or when two same-named products *disagree*. That
+        last case is the point of the guard: reporting one sibling's absence
+        for a question about the other would be the inference this story
+        exists to prevent, so the buyer is asked which one they mean instead.
+        """
+        from .coverage import Availability, NOT_PUBLISHED_ABOUT, NOT_PUBLISHED_SPECS
+        from .coverage import UnknownProduct
+        from .orchestrator import Intent
+
+        if self.probe is None or self.answers is None:
+            return None
+        wanted = _asked_about(message)
+        if wanted is None:
+            return None
+
+        resolution = self.answers.resolver.resolve(message)
+        candidates = []
+        if resolution.ok and resolution.product is not None:
+            candidates = [resolution.product]
+        elif resolution.kind.value == "ambiguous":
+            candidates = list(resolution.candidates)
+        if not candidates:
+            return None
+
+        def unpublished(product) -> bool:
+            try:
+                availability = self.probe.for_product(product.product_id)
+            except UnknownProduct:
+                return False
+            aspect = getattr(availability, wanted)
+            return aspect is Availability.NOT_PUBLISHED
+
+        if not all(unpublished(product) for product in candidates):
+            return None
+
+        product = candidates[0]
+        template = NOT_PUBLISHED_SPECS if wanted == "specs" else NOT_PUBLISHED_ABOUT
+        # The plain name, deliberately: with two same-named products the
+        # disambiguator would pick one of them, and neither is the answer —
+        # the statement is true of both, and naming one would be the sibling
+        # selection this branch exists to avoid.
+        base.text = template.format(product=product.label())
+        base.intent = Intent.CATALOGUE.value
+        # An absence is a statement about the catalogue, so it is grounded —
+        # in the product record that is missing the data, which is checkable.
+        base.grounded = True
+        base.cite(self._product_citation(product))
+        return base
+
+    @staticmethod
+    def _product_citation(product, *, source_url: str | None = None) -> dict:
+        """A citation for an answer that came from a corpus row, not a chunk."""
+        return {
+            "chunk_id": f"product:{product.product_id}",
+            "chunk_type": "product_record",
+            "product_id": product.product_id,
+            "product_name": product.name,
+            "source_url": source_url or product.url or None,
+            "content_hash": "",
+        }
+
+    @staticmethod
+    def _company_citation(answer, kind: str) -> dict:
+        """A citation for a company fact — the collected record it came from.
+
+        `Answer.grounded_on` names the corpus table and field the value was read
+        from (`company_ids[phone]`, `branches`, …), which is the checkable
+        source for a statutory claim (`TAC-6`).
+        """
+        record = str(getattr(answer, "grounded_on", "") or f"company[{kind}]")
+        return {
+            "chunk_id": f"company:{record}",
+            "chunk_type": "company_record",
+            "product_id": None,
+            "product_name": None,
+            "source_url": getattr(answer, "source_url", None) or None,
+            "content_hash": "",
+            "record": record,
+        }
+
+    @staticmethod
+    def _cite_chunks(base: ChatReply, result) -> None:
+        """Attach every chunk the answer was composed from (`TAC-1`).
+
+        Prefers the result's own `provenance` (the TRD-16 payload) and derives
+        the same shape from the chunks when a retriever-shaped object does not
+        provide it — the engine duck-types its retriever deliberately, so a
+        citation must not be the one thing that requires a concrete class.
+        """
+        provenance = getattr(result, "provenance", None)
+        if provenance is None:
+            provenance = []
+            for scored in getattr(result, "chunks", ()) or ():
+                chunk = getattr(scored, "chunk", scored)
+                provenance.append({
+                    "chunk_id": getattr(chunk, "chunk_id", "") or "",
+                    "chunk_type": getattr(chunk, "chunk_type", "") or "",
+                    "product_id": getattr(chunk, "product_id", None),
+                    "product_name": getattr(chunk, "product_name", None),
+                    "source_url": getattr(chunk, "source_url", None),
+                    "content_hash": getattr(chunk, "content_hash", "") or "",
+                })
+        for citation in provenance:
+            base.cite(citation)
+
+    def _follow_up_product(self, conversation):
+        """The last product this conversation was actually about.
+
+        Scans the buyer's turns newest-first and returns the first product the
+        resolver can identify. Cross-channel context turns are included on
+        purpose: a buyer who asked about a machine on web chat and then calls
+        is exactly the case this exists for (`US-004 AC-1`).
+        """
+        if self.answers is None:
+            return None
+        for turn in reversed(getattr(conversation, "turns", ()) or ()):
+            if turn.role != "user":
+                continue
+            resolution = self.answers.resolver.resolve(turn.content or "")
+            if resolution.ok and resolution.product is not None:
+                return resolution.product
+        return None
 
     def _interest(self, conversation) -> list[str]:
         """Products mentioned anywhere in this conversation.
@@ -506,12 +810,20 @@ class AnswerEngine:
         11122" produced a lead with a phone number and no name. Earlier turns
         are read first so the most recent statement wins on any field the buyer
         has since corrected.
+
+        **Turns seeded as cross-channel context are skipped** (US-004). They
+        belong to another conversation and are carried in so the buyer does not
+        have to repeat which product they meant — not so their details are
+        captured a second time. Without this, a buyer who gave a number on web
+        chat and then asked a *product* question by phone was answered with
+        "Thank you — I've passed your details", because the context turn still
+        contained the number.
         """
         from .leads import extract_lead_details
 
         merged: dict = {}
         for turn in conversation.turns:
-            if turn.role == "user":
+            if turn.role == "user" and not getattr(turn, "external", False):
                 merged.update({k: v for k, v in extract_lead_details(turn.content or "").items() if v})
         merged.update({k: v for k, v in extract_lead_details(message or "").items() if v})
         return merged
@@ -572,6 +884,16 @@ class AnswerEngine:
             # capture() found nothing usable — do not claim otherwise.
             return None
 
+        # US-004: remember the lead on the conversation. The orchestrator reads
+        # this to write the identity link, so a later call from the number the
+        # buyer just gave resolves to the same lead (`BRD-02`, `AC-1`).
+        try:
+            conversation.lead_id = lead.lead_id
+            conversation.lead_phone = lead.phone
+            conversation.lead_email = lead.email
+        except Exception:  # noqa: BLE001 - a read-only conversation is not a failure
+            pass
+
         return ChatReply(
             text=LEAD_CAPTURED_TEXT,
             conversation_id=conversation.conversation_id,
@@ -587,7 +909,7 @@ class AnswerEngine:
         through is deliberate: retrieval may still find the answer in prose, and
         a question the engine cannot parse is not a question to refuse.
         """
-        from .answers import fact_kind_for
+        from .answers import Resolution, ResolutionKind, fact_kind_for
 
         kind = fact_kind_for(message)
         if kind is None:
@@ -604,16 +926,35 @@ class AnswerEngine:
             return base
 
         if not resolution.ok or resolution.product is None:
-            # The fact was recognised — they want a price — but no product was.
-            # Declining is the only honest answer, and falling through to
-            # retrieval is actively worse: asked for "the price of the MRI
-            # machine you sell", retrieval returned a cassette FAQ about X-ray
-            # procedure. That tells the buyer we sell MRI machines and then
-            # answers a question they did not ask. There is no correct price for
-            # an unidentifiable product.
-            base.text = DECLINE_TEXT
-            base.declined = True
-            return base
+            # US-002 AC-2 / US-004 AC-1: a follow-up fact question — "and the
+            # price?", "what about the MOQ?" — names no product because the
+            # product was named a moment ago, possibly in another channel.
+            # Resolving it from the conversation is what a human does; the
+            # alternative, refusing, is what made a working assistant look
+            # broken on the second question of every conversation.
+            #
+            # The guard matters as much as the fallback: a message that names
+            # a product we cannot match ("the MRI machine you sell") must still
+            # decline rather than answer about whatever was discussed earlier.
+            # The fallback therefore fires only when the message names nothing
+            # beyond fact words and filler.
+            follow_up = (
+                self._follow_up_product(conversation)
+                if _names_no_product(message) else None
+            )
+            if follow_up is None:
+                # The fact was recognised — they want a price — but no product
+                # was. Declining is the only honest answer, and falling through
+                # to retrieval is actively worse: asked for "the price of the
+                # MRI machine you sell", retrieval returned a cassette FAQ
+                # about X-ray procedure. That tells the buyer we sell MRI
+                # machines and then answers a question they did not ask. There
+                # is no correct price for an unidentifiable product.
+                base.text = DECLINE_TEXT
+                base.declined = True
+                return base
+            resolution = Resolution(ResolutionKind.RESOLVED, product=follow_up,
+                                    query=message)
 
         answer = self.answers.commercial(kind, resolution.product)
         # render() carries the price caveat with the number, so it cannot be
@@ -621,6 +962,9 @@ class AnswerEngine:
         base.text = answer.render()
         base.grounded = answer.found
         base.source_url = answer.source_url
+        if answer.found:
+            base.cite(self._product_citation(resolution.product,
+                                             source_url=answer.source_url))
         # An unpublished fact is an answer, not a failure: the engine says so in
         # words, and marking it unavailable keeps the turn out of the "answered
         # from the catalogue" count.

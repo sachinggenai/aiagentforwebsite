@@ -104,6 +104,35 @@ Vanilla JS, no framework, no build step; a 2 s polling loop on `/admin/api/healt
 
 No events are published by MOD-10. Every consumed endpoint is a read except the two explicit mutations in `CS-5`.
 
+**As built — the browser-voice frame contract (US-003/US-008, frozen 2026-10-04).**
+The transport went live this revision; the contract below is what the server
+and the shipped client actually speak, and both are asserted against it
+(`tests/test_mod01_browser_voice.py`, `tests/e2e/voice.spec.js`). The token is
+sent in the **first frame**, never the query string — a credential in a URL
+lands in tunnel logs and history (`TAC-8`); the socket is accepted, then closed
+with a real code if the handshake fails (a close before `accept` reaches the
+browser as an HTTP 403 with no code at all).
+
+| Direction | Frame | Meaning |
+|---|---|---|
+| client → server | `{"type":"auth","token"}` | First frame; HMAC-signed TTL token. Unsigned/expired → close `4001` |
+| client → server | `{"type":"start","conversation_id"}` | Idempotent; server answers `ready` |
+| client → server | `{"type":"audio","pcm16":<b64>}` | Mono PCM16 @ 16 kHz; server decimates to 8 kHz µ-law for the engine |
+| client → server | `{"type":"commit"}` | Push-to-talk: forces the turn when there is no trailing silence (MediaRecorder fallback) |
+| client → server | `{"type":"stop_speaking"}` | Interrupt: engine stops, client flushes its playback queue |
+| client → server | `{"type":"stop"}` | Clean end → close `1000` |
+| server → client | `{"type":"ready","session_id"}` | Session opened; capture may start |
+| server → client | `{"type":"transcript","role","text","final"}` | Both halves of the turn — the buyer's words and the answer, as text |
+| server → client | `{"type":"audio","ulaw_b64"}` | 20 ms µ-law frame; client schedules it on one ordered queue |
+| server → client | `{"type":"flush"}` | Server-side barge-in: drop buffered playback |
+| server → client | `{"type":"turn_complete","turn_id"}` | Turn settled; client returns to `listening` when the queue drains |
+| server → client | `{"type":"busy","callback_number","message"}` | Admission refused → close `4002` |
+| server → client | `{"type":"error","code"}` | `rate_limited` (→ close `4008`) or `turn_failed` |
+
+Close codes: `1000` normal · `4001` token · `4002` admission · `4008` rate
+limit. Idle (30 s without a frame) closes `1000` with `close_reason='idle'`,
+releasing the voice slot.
+
 ### B.4 Data Model
 
 MOD-10 owns **no persistent store** — a deliberate property, so a console outage can never lose a conversation. It renders read models owned elsewhere:

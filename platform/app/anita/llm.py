@@ -212,7 +212,10 @@ class OllamaBackend:
         model: str,
         *,
         num_ctx: int = 8192,
-        keep_alive: str = "-1",
+        # Ollama rejects a bare "-1" ("time: missing unit in duration") with
+        # HTTP 400 on every request, and the failure reads as a model fault.
+        # The configured value carries its unit; so must the default.
+        keep_alive: str = "-1m",
         timeout: float = 60.0,
         first_token_timeout: float = FIRST_TOKEN_TIMEOUT_S,
         breaker: CircuitBreaker | None = None,

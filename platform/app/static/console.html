@@ -102,6 +102,16 @@
   </section>
 
   <section class="wide">
+    <h2>Escalations — waiting for a person <span id="handoffsOpen" class="pill"></span></h2>
+    <div id="handoffs"><div class="empty">Not connected.</div></div>
+  </section>
+
+  <section class="wide">
+    <h2>Outbound sends — answers the carrier must carry <span id="sendsFailed" class="pill"></span></h2>
+    <div id="sends"><div class="empty">Not connected.</div></div>
+  </section>
+
+  <section class="wide">
     <h2>Conversations</h2>
     <div id="conversations"><div class="empty">Not connected.</div></div>
   </section>
@@ -136,6 +146,15 @@ function unavailable(reason) {
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) =>
     ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
+}
+
+// Only http(s) becomes a link — a citation value from the corpus must not be
+// able to inject a javascript: URL into the console.
+function safeUrl(value) {
+  try {
+    const parsed = new URL(String(value), window.location.origin);
+    return (parsed.protocol === "http:" || parsed.protocol === "https:") ? parsed.href : null;
+  } catch { return null; }
 }
 
 async function api(route, options = {}) {
@@ -190,44 +209,171 @@ async function loadMetrics() {
   }).join("") || '<div class="empty">No metrics reported.</div>';
 }
 
+// --- escalations -----------------------------------------------------------
+async function loadHandoffs() {
+  const { ok, status, body } = await api("/api/admin/handoffs");
+  const host = $("handoffs");
+  const badge = $("handoffsOpen");
+  if (status === 401) { host.innerHTML = '<div class="err">Not authorised.</div>'; return; }
+  if (!ok || body.unavailable) { host.innerHTML = unavailable(body.reason); badge.textContent = ""; return; }
+  const list = body.handoffs || [];
+  // The count is the actionable number: open means nobody has been told yet.
+  badge.textContent = (body.open || 0) + " open";
+  if (!list.length) { host.innerHTML = '<div class="empty">Nothing waiting.</div>'; return; }
+  host.innerHTML = list.map((h) =>
+    '<div class="row"><span class="led ' + (h.state === "open" ? "" : "ok") + '"></span>' +
+    '<span class="name">' + esc(h.lead_id || "anonymous") + '</span>' +
+    '<span class="detail">' + esc(h.reason) + ' · ' + esc(h.state) + '</span>' +
+    '<span class="spacer"></span>' +
+    '<span class="detail">' + esc((h.conversation_id || "").slice(0, 8)) + '</span></div>'
+  ).join("");
+}
+
+// --- outbound sends (US-002) ------------------------------------------------
+async function loadSends() {
+  const { ok, status, body } = await api("/api/admin/sends");
+  const host = $("sends");
+  const badge = $("sendsFailed");
+  if (status === 401) { host.innerHTML = '<div class="err">Not authorised.</div>'; return; }
+  if (!ok || body.unavailable) { host.innerHTML = unavailable(body.reason); badge.textContent = ""; return; }
+  const list = body.sends || [];
+  const counts = body.counts || {};
+  // A status with no rows is absent from counts, not zero — show only what
+  // the store actually reported.
+  badge.textContent = Object.keys(counts).sort().map((key) => counts[key] + " " + key.toLowerCase()).join(" · ");
+  if (!list.length) { host.innerHTML = '<div class="empty">No sends queued.</div>'; return; }
+  host.innerHTML = list.map((s) => {
+    const cls = s.status === "FAILED" ? "bad" : (s.status === "SENT" ? "ok" : "unknown");
+    const label = [s.status, s.channel, "attempt " + s.attempt].join(" · ");
+    return '<div class="row"><span class="led ' + cls + '"></span>' +
+      '<span class="name">' + esc(s.conversation_id || "unknown") + '</span>' +
+      '<span class="detail">' + esc(label) + '</span>' +
+      '<span class="spacer"></span>' +
+      '<span class="detail">' + esc(s.last_error ? s.last_error.slice(0, 80) : "") + '</span></div>';
+  }).join("");
+}
+
 // --- conversations ---------------------------------------------------------
-async function loadConversations() {
-  const { ok, status, body } = await api("/api/admin/conversations");
+let conversationsOffset = 0;
+const CONVERSATIONS_PAGE = 25;
+
+async function loadConversations({ reset = false } = {}) {
+  if (reset) conversationsOffset = 0;
+  const { ok, status, body } = await api(
+    "/api/admin/conversations?limit=" + CONVERSATIONS_PAGE + "&offset=" + conversationsOffset);
   const host = $("conversations");
   if (status === 401) { host.innerHTML = '<div class="err">Not authorised.</div>'; return; }
   if (!ok || body.unavailable) { host.innerHTML = unavailable(body.reason); return; }
   const list = body.conversations || [];
-  if (!list.length) {
+  if (!list.length && conversationsOffset === 0) {
     // An empty list and a broken registry look identical on screen unless the
     // page says which it is — so it says nothing rather than guessing.
     host.innerHTML = '<div class="empty">No conversations.</div>';
     return;
   }
-  // In the list `turns` is a count; in the detail endpoint it is the array of
-  // turns. Same name, two shapes — the list uses it as a number, the viewer
-  // iterates it.
-  host.innerHTML = list.map((c) =>
+  const rows = list.map((c) =>
     '<div class="row"><span class="led ' + (c.state === "active" ? "ok" : "") + '"></span>' +
     '<span class="name">' + esc((c.channels_seen || []).join(" + ") || "—") + '</span>' +
-    '<span class="detail">' + c.turns + ' turns · ' + esc(c.state) + '</span>' +
+    '<span class="detail">' + c.turns + ' turns · ' + esc(c.state) +
+    (c.identity_type && c.identity_type !== "anonymous" ? ' · ' + esc(c.identity_type) : '') + '</span>' +
     '<span class="spacer"></span>' +
     '<button class="ghost" data-open="' + esc(c.conversation_id) + '">Review</button></div>'
   ).join("");
+  if (conversationsOffset === 0) host.innerHTML = rows;
+  else host.insertAdjacentHTML("beforeend", rows);
+
+  if (list.length === CONVERSATIONS_PAGE) {
+    conversationsOffset += list.length;
+    host.insertAdjacentHTML("beforeend",
+      '<div class="row"><span class="spacer"></span>' +
+      '<button class="ghost" id="moreConversations">Load more</button>' +
+      '<span class="detail">' + body.count + ' total</span></div>');
+    const more = $("moreConversations");
+    if (more) more.addEventListener("click", () => loadConversations());
+  }
+}
+
+// The transcript pages at 100 turns (`AC-6`): a 500-turn conversation is
+// opened in the same time as a 10-turn one, and the rest arrives on demand.
+const TRANSCRIPT_PAGE = 100;
+let viewerTurns = [];
+let viewerAfterSeq = 0;
+
+function renderTranscript(body) {
+  const host = $("viewerBody");
+  if (body.transcript_state === "expired") {
+    // Expired is labelled with its date, never rendered as empty (`AC-7`) —
+    // "we deleted it under retention" and "there was nothing" are different
+    // facts and only one of them is a policy.
+    host.innerHTML = '<div class="unavailable">Transcript expired under retention on ' +
+      esc((body.transcript_expired_at || "").slice(0, 10)) +
+      ' — the conversation and its lead remain on record.</div>' + handoffBlock(body);
+    return;
+  }
+  const traces = viewerTurns.map((t) => {
+    const cls = t.state === "FAILED" ? "failed" : (t.role === "user" ? "user" : "");
+    const meta = [t.role, t.classification, t.route,
+                  t.state === "FAILED" ? "FAILED" : null].filter(Boolean).join(" · ");
+    const text = (t.content || "").length > 8000
+      ? t.content.slice(0, 8000) + "\n… (truncated in review; stored whole)"
+      : (t.content || "");
+    // US-012: the grounding for the turn, so a reviewer can check the claim
+    // against the record it came from. A chunk id is shown as an id; a URL
+    // becomes a link through safeUrl so a corpus value cannot inject markup.
+    const refs = t.grounding_refs || [];
+    const sources = refs.length
+      ? '<div class="detail">grounded on: ' + refs.map((ref) => {
+          const href = safeUrl(ref);
+          return href
+            ? '<a href="' + esc(href) + '" target="_blank" rel="noopener noreferrer">' + esc(ref) + '</a>'
+            : esc(ref);
+        }).join(", ") + '</div>'
+      : "";
+    return '<div class="trace ' + cls + '"><div class="who">' + esc(meta) + '</div>' +
+           '<div>' + esc(text) + '</div>' + sources + '</div>';
+  }).join("");
+  const empty = viewerTurns.length
+    ? ""
+    : '<div class="empty">No transcript — ' +
+      (body.turn_count ? "the first page is still loading." :
+        "this conversation has no turns.") + '</div>';
+  host.innerHTML =
+    '<div class="row"><span class="detail">' + esc(body.summary || "no summary yet") + '</span></div>' +
+    handoffBlock(body) + (traces || empty) +
+    (viewerTurns.length < body.turn_count
+      ? '<div class="row"><span class="spacer"></span>' +
+        '<button class="ghost" id="moreTurns">Load more turns (' +
+        viewerTurns.length + ' of ' + body.turn_count + ')</button></div>'
+      : "");
+  const more = $("moreTurns");
+  if (more) more.addEventListener("click", () => loadTurns(body.conversation_id, true));
+}
+
+function handoffBlock(body) {
+  const handoffs = body.handoffs || [];
+  if (!handoffs.length) return "";
+  return handoffs.map((h) =>
+    '<div class="row"><span class="led ' + (h.state === "open" ? "" : "ok") + '"></span>' +
+    '<span class="name">handoff</span><span class="detail">' +
+    esc(h.reason) + ' · ' + esc(h.state) + '</span></div>').join("");
+}
+
+async function loadTurns(conversationId, append = false) {
+  const { ok, body } = await api("/api/admin/conversation?conversation_id=" +
+    encodeURIComponent(conversationId) + "&after_seq=" + viewerAfterSeq +
+    "&limit=" + TRANSCRIPT_PAGE);
+  if (!ok) return;
+  if (append) viewerTurns = viewerTurns.concat(body.turns || []);
+  else viewerTurns = body.turns || [];
+  viewerAfterSeq = body.next_after_seq || 0;
+  renderTranscript(body);
 }
 
 async function openConversation(id) {
-  const { ok, body } = await api("/api/admin/conversation?conversation_id=" + encodeURIComponent(id));
   $("viewerTitle").textContent = "Conversation " + id.slice(0, 8);
-  const host = $("viewerBody");
-  if (!ok) { host.innerHTML = '<div class="err">' + esc(body.error || "Could not load") + '</div>'; }
-  else {
-    host.innerHTML = (body.turns || []).map((t) => {
-      const cls = t.failed ? "failed" : (t.role === "user" ? "user" : "");
-      const meta = [t.role, t.intent, t.failed ? "FAILED" : null].filter(Boolean).join(" · ");
-      return '<div class="trace ' + cls + '"><div class="who">' + esc(meta) + '</div>' +
-             '<div>' + esc(t.content) + '</div></div>';
-    }).join("") || '<div class="empty">No turns.</div>';
-  }
+  viewerTurns = [];
+  viewerAfterSeq = 0;
+  await loadTurns(id);
   $("viewer").showModal();
 }
 
@@ -263,7 +409,12 @@ async function runGate() {
 function refresh() {
   loadChannels().catch(() => {});
   loadMetrics().catch(() => {});
-  loadConversations().catch(() => {});
+  loadHandoffs().catch(() => {});
+  loadSends().catch(() => {});
+  // Re-reads from the top: a two-second poll that appended to a paged list
+  // would grow the DOM without bound, and the operator's scroll position is
+  // worth less than a list that reflects what is actually there now.
+  loadConversations({ reset: true }).catch(() => {});
 }
 
 function connect() {
@@ -285,7 +436,7 @@ function disconnect() {
   $("instance").textContent = "disconnected";
   $("connect").disabled = false;
   $("disconnect").disabled = true;
-  ["channels", "metrics", "conversations", "gate"].forEach((id) => {
+  ["channels", "metrics", "conversations", "gate", "sends"].forEach((id) => {
     $(id).innerHTML = '<div class="empty">Not connected.</div>';
   });
 }

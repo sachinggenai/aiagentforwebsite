@@ -210,3 +210,89 @@ def test_the_chat_page_refuses_non_http_source_links():
     assert 'parsed.protocol === "http:"' in html
     assert 'parsed.protocol === "https:"' in html
     assert 'rel = "noopener noreferrer"' in html
+
+
+# ---------------------------------------------------------------------------
+# The browser voice client (US-008)
+# ---------------------------------------------------------------------------
+# The client is hand-written vanilla JS with no test framework, so the contract
+# is asserted the way it is written: by reading the page. These are the
+# properties whose absence is a defect a browser test would only *sometimes*
+# catch — a state with no sentence, a token written to storage, a dead control.
+WORKLET = STATIC / "pcm-worklet.js"
+
+
+def test_the_capture_worklet_exists_and_emits_pcm16():
+    assert WORKLET.exists(), "the AudioWorklet capture module has not been built"
+    source = WORKLET.read_text(encoding="utf-8")
+    assert "registerProcessor" in source
+    assert "Int16Array" in source, "the worklet must emit PCM16, not float"
+    assert "16000" in source
+
+
+def test_the_chat_page_loads_the_worklet_and_has_a_fallback():
+    """TAC-2: AudioWorklet first, MediaRecorder when it is unavailable — and
+    both paths must exist, because the fallback is what a Safari on an older
+    tablet gets."""
+    html = CHAT.read_text(encoding="utf-8")
+    assert "/static/pcm-worklet.js" in html
+    assert "audioWorklet" in html
+    assert "MediaRecorder" in html
+
+
+def test_every_voice_state_has_a_sentence_in_a_status_region():
+    """TAC-6: the voice path is never the only path, and a state a sighted
+    user reads from a colour must also be text for everyone else."""
+    html = CHAT.read_text(encoding="utf-8")
+    assert 'role="status"' in html and "aria-live" in html
+    for state in ('"idle"', '"mic_requested"', '"connecting"', '"listening"',
+                  '"thinking"', '"speaking"', '"ended"', '"degraded"'):
+        assert state in html, f"voice state {state} is not in the client"
+    assert "voiceSentence" in html
+    assert "setVoiceState" in html
+
+
+def test_the_buyer_page_never_persists_a_voice_session():
+    """TAC-5: no localStorage / sessionStorage / IndexedDB on the buyer page.
+    The token lives in a closure; a closed tab leaves nothing behind."""
+    html = CHAT.read_text(encoding="utf-8")
+    assert not re.search(r"localStorage\s*\.", html)
+    assert not re.search(r"sessionStorage\s*\.", html)
+    assert "indexedDB" not in html
+
+
+def test_the_voice_token_never_travels_in_a_url():
+    """A credential in a query string lands in tunnel logs and history
+    (TAC-8). It is sent in the first socket frame instead."""
+    html = CHAT.read_text(encoding="utf-8")
+    assert '"/voice/browser"' in html
+    assert "?token=" not in html
+    assert '"auth"' in html and "token)" in html
+
+
+def test_the_client_can_interrupt_and_flush_playback():
+    """AC-2 / TAC-4: the interrupt sends stop_speaking and clears the ordered
+    queue; the server's `flush` frame does the same on a server-side barge-in."""
+    html = CHAT.read_text(encoding="utf-8")
+    assert "stop_speaking" in html
+    assert "flushPlayback" in html
+    assert "playCursor" in html, "playback must be scheduled as one ordered queue"
+
+
+def test_the_client_decodes_ulaw_itself():
+    """The server sends the engine's own frames (8 kHz µ-law); the client
+    decodes them — no dependency, and no second TTS stack."""
+    html = CHAT.read_text(encoding="utf-8")
+    assert "ULAW_TABLE" in html
+    assert "createBuffer" in html
+
+
+def test_every_voice_failure_lands_in_a_state_with_the_text_path_open():
+    """AC-3/4/5/6/7 and CS-4: permission denied, no device, busy, dropped and
+    rate-limited all reach DEGRADED with text chat still usable — and the
+    phone number is shown whenever the server gave one."""
+    html = CHAT.read_text(encoding="utf-8")
+    assert "function degrade(" in html
+    for reason in ('"denied"', '"unsupported"', '"busy"', '"dropped"', '"rate"'):
+        assert reason in html, f"no degraded copy for {reason}"
+    assert "callbackNumber" in html

@@ -182,7 +182,8 @@ class TestArguments:
         An undeclared argument would silently never be populated."""
         declared = set(BODY_ARGUMENTS) | set(QUERY_ARGUMENTS)
         takes_nothing = {Route.HEALTH, Route.ADMIN_CHANNELS,
-                         Route.ADMIN_METRICS, Route.ADMIN_GATE}
+                         Route.ADMIN_METRICS, Route.ADMIN_GATE,
+                         Route.ADMIN_HANDOFFS}
         assert set(Route) - declared == takes_nothing
 
     def test_no_argument_is_declared_in_both_places(self):

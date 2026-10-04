@@ -28,6 +28,13 @@ module.exports = defineConfig({
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
     video: "retain-on-failure",
+    // A fake capture device exists so the voice scenarios (voice.spec.js) can
+    // exercise the real capture path. Permission is still controlled per
+    // context by grantPermissions — without a grant, Chromium denies the
+    // request, which is the degraded scenario.
+    launchOptions: {
+      args: ["--use-fake-device-for-media-stream"],
+    },
   },
 
   projects: [

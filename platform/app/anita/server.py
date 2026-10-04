@@ -22,6 +22,7 @@ adapter never compares it itself, and never logs it.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -54,14 +55,19 @@ BODY_ARGUMENTS: dict[Route, tuple[str, ...]] = {
 }
 QUERY_ARGUMENTS: dict[Route, tuple[str, ...]] = {
     Route.CHAT_HISTORY: ("session_id",),
-    Route.ADMIN_CONVERSATION: ("conversation_id",),
-    Route.ADMIN_CONVERSATIONS: ("limit",),
+    Route.ADMIN_CONVERSATION: ("conversation_id", "after_seq", "limit"),
+    Route.ADMIN_CONVERSATIONS: ("limit", "offset"),
+    # US-002: the send queue. `status` filters to one state (FAILED first for
+    # the operator), `limit` bounds the read.
+    Route.ADMIN_SENDS: ("limit", "status"),
 }
 
 # Query parameters that arrive as strings but are declared as ints. Coerced
 # explicitly: passing "50" where an int is expected would compare and format
 # wrong rather than fail.
-INT_ARGUMENTS: dict[str, Callable[[Any], int]] = {"limit": int}
+INT_ARGUMENTS: dict[str, Callable[[Any], int]] = {
+    "limit": int, "offset": int, "after_seq": int,
+}
 
 
 def _bearer(request: Request) -> str | None:
@@ -164,36 +170,182 @@ def create_app(router: Router, *, title: str = "ANITA MEDICAL SYSTEMS") -> FastA
         async def twilio_status(request: Request) -> Any:
             return await _handle_twilio(request, "status")
 
-        if router.voice_sessions is not None:
+    # -- Twilio messaging (US-002) -----------------------------------------
+    # Same shape as the voice webhook — raw form, signature header, a tuple
+    # back — because it is the same kind of ingress. The reply does not travel
+    # in the response body: a messaging webhook answers empty and the answer
+    # goes out through the Messages API, so the body here is always empty.
+    if getattr(router, "messaging", None) is not None:
+        messaging = router.messaging
 
-            @app.websocket("/twilio/media-stream")
-            async def twilio_media_stream(websocket: WebSocket) -> None:
-                """The audio door (US-001, `WS /twilio/media-stream`).
+        @app.post("/twilio/whatsapp", include_in_schema=False)
+        async def twilio_whatsapp(request: Request) -> Any:
+            try:
+                form = await request.form()
+            except Exception:  # noqa: BLE001 - an unparseable body is not a valid webhook
+                form = {}
+            params = {str(key): str(value) for key, value in form.items()}
+            status, body, content_type = messaging.whatsapp(
+                params=params,
+                signature=request.headers.get("x-twilio-signature"),
+            )
+            return RawResponse(content=body, status_code=status, media_type=content_type)
 
-                The relay does the protocol; this function owns only the
-                socket's lifetime. Every exit path closes the relay, because a
-                stream that ends without releasing its slot erodes the
-                admission ceiling silently — the box goes on refusing calls
-                while sitting idle (`AC-8`, `SM-04`).
-                """
-                from .media_stream import TwilioMediaStream
+    # -- extra-channel ingress (US-002) ------------------------------------
+    # HMAC over the raw body, so the body is read as bytes and never
+    # re-serialised before the signature is checked.
+    if getattr(router, "extra_channel", None) is not None:
+        ingress = router.extra_channel
 
-                await websocket.accept()
-                relay = TwilioMediaStream(
-                    session=router.voice_sessions(""),
-                    send=websocket.send_json,
-                    admission=router.voice.admission,
-                    store=getattr(router.voice, "store", None),
-                )
+        @app.post("/channels/{channel_id}/inbound", include_in_schema=False)
+        async def extra_channel_inbound(channel_id: str, request: Request) -> Any:
+            raw = await request.body()
+            status, payload = ingress.handle(
+                channel_id,
+                body=raw,
+                signature=request.headers.get("x-anita-signature"),
+            )
+            return JSONResponse(status_code=status, content=payload)
+
+    # -- browser-mic voice (US-003) ----------------------------------------
+    # The token is verified **before** the socket is accepted into the media
+    # path, and the close code carries the reason the story's client contract
+    # names: 4001 token, 4002 admission, 4008 rate limit (US-008 reads these).
+    if getattr(router, "browser_voice", None) is not None and router.voice_tokens is not None:
+        from .browser_voice import (
+            CLOSE_ADMISSION,
+            CLOSE_NORMAL,
+            CLOSE_RATE_LIMITED,
+            CLOSE_TOKEN,
+            BrowserVoiceSession,
+            SessionTokens,
+            TokenError,
+        )
+
+        tokens: SessionTokens = router.voice_tokens
+        # Per-IP concurrent socket cap. In-process and therefore per-worker:
+        # correct for a single-instance deploy, named here so a future
+        # multi-worker deploy knows this is one of the things that moves.
+        _open_per_ip: dict[str, int] = {}
+        _open_total = {"n": 0}
+        MAX_WS_PER_IP = 10
+        MAX_WS_TOTAL = 200
+
+        @app.websocket("/voice/browser")
+        async def voice_browser(websocket: WebSocket) -> None:
+            client_ip = (websocket.client.host if websocket.client else "") or "unknown"
+
+            # Accepted first, then closed with a real code: a close issued
+            # before `accept` is delivered as an HTTP 403 and the browser
+            # never sees 4001/4002/4008 at all.
+            await websocket.accept()
+
+            # The token arrives in the first frame, not the query string. A
+            # credential in a URL lands in tunnel logs, proxy logs and browser
+            # history (`TAC-8`); a first frame lands nowhere but here.
+            try:
+                hello = json.loads(await asyncio.wait_for(websocket.receive_text(), timeout=5.0))
+                token = str(hello.get("token") or "") if isinstance(hello, dict) else ""
+                claims = tokens.verify(token)
+            except (asyncio.TimeoutError, ValueError, TokenError) as exc:
+                reason = getattr(exc, "reason", "invalid")
+                logger.info("browser voice: handshake refused (%s)", reason)
+                await websocket.close(code=CLOSE_TOKEN)
+                return
+
+            if _open_per_ip.get(client_ip, 0) >= MAX_WS_PER_IP or _open_total["n"] >= MAX_WS_TOTAL:
+                logger.warning("browser voice: connection cap reached for one client")
+                await websocket.close(code=CLOSE_RATE_LIMITED)
+                return
+
+            admission = getattr(router.voice, "admission", None)
+            call_id = f"browser-{claims.session_id}"
+            if admission is not None:
+                decision = admission.admit(call_id)
+                if not decision.admitted:
+                    # Busy is a designed outcome with something to say: the
+                    # client shows the callback number and offers text (`AC-7`).
+                    await websocket.send_json({
+                        "type": "busy",
+                        "callback_number": getattr(router.voice, "callback_number", ""),
+                        "message": getattr(decision, "message", ""),
+                    })
+                    await websocket.close(code=CLOSE_ADMISSION)
+                    return
+
+            _open_per_ip[client_ip] = _open_per_ip.get(client_ip, 0) + 1
+            _open_total["n"] += 1
+
+            session = router.browser_voice(claims.session_id)
+            relay = BrowserVoiceSession(
+                session=session,
+                send=websocket.send_json,
+                admission=admission,
+                store=getattr(router.voice, "store", None),
+                call_id=call_id,
+                session_key=claims.session_id,
+            )
+
+            reason = "socket_error"
+            try:
+                while True:
+                    try:
+                        raw = await asyncio.wait_for(
+                            websocket.receive_text(), timeout=relay.idle_timeout_s
+                        )
+                    except asyncio.TimeoutError:
+                        # 30 s without a frame closes the session — an idle
+                        # socket must not hold an admission slot (`TAC-5`).
+                        reason = "idle"
+                        break
+                    await relay.handle_message(raw)
+                    if relay.close_requested:
+                        reason = relay.close_reason or "client_stop"
+                        break
+            except WebSocketDisconnect:
+                reason = "client_stop"
+            except Exception:  # noqa: BLE001 - teardown must not depend on the cause
+                logger.exception("browser voice: session failed, tearing down")
+                reason = "socket_error"
+            finally:
+                _open_per_ip[client_ip] = max(0, _open_per_ip.get(client_ip, 1) - 1)
+                _open_total["n"] = max(0, _open_total["n"] - 1)
+                await relay.close(reason=reason)
                 try:
-                    while True:
-                        await relay.handle_message(await websocket.receive_text())
-                except WebSocketDisconnect:
-                    # A caller who hangs up, or a dropped socket. Not an error.
-                    await relay.close(reason="disconnect")
-                except Exception:  # noqa: BLE001 - teardown must not depend on the cause
-                    logger.exception("media stream: relay failed, tearing the call down")
-                    await relay.close(reason="error")
+                    await websocket.close(code=relay.close_code or CLOSE_NORMAL)
+                except Exception:  # noqa: BLE001 - the peer may already be gone
+                    pass
+
+    if router.voice_sessions is not None:
+
+        @app.websocket("/twilio/media-stream")
+        async def twilio_media_stream(websocket: WebSocket) -> None:
+            """The audio door (US-001, `WS /twilio/media-stream`).
+
+            The relay does the protocol; this function owns only the
+            socket's lifetime. Every exit path closes the relay, because a
+            stream that ends without releasing its slot erodes the
+            admission ceiling silently — the box goes on refusing calls
+            while sitting idle (`AC-8`, `SM-04`).
+            """
+            from .media_stream import TwilioMediaStream
+
+            await websocket.accept()
+            relay = TwilioMediaStream(
+                session=router.voice_sessions(""),
+                send=websocket.send_json,
+                admission=router.voice.admission,
+                store=getattr(router.voice, "store", None),
+            )
+            try:
+                while True:
+                    await relay.handle_message(await websocket.receive_text())
+            except WebSocketDisconnect:
+                # A caller who hangs up, or a dropped socket. Not an error.
+                await relay.close(reason="disconnect")
+            except Exception:  # noqa: BLE001 - teardown must not depend on the cause
+                logger.exception("media stream: relay failed, tearing the call down")
+                await relay.close(reason="error")
 
     @app.get("/", include_in_schema=False)
     async def chat_page() -> Any:

@@ -1,4 +1,4 @@
-> **Lens:** TPO · **Updated:** 2026-10-04 · **Scope:** every workstream — the SDLC plan (Stages 0–11), the D4 build (US-001…US-030), CR-01 (US-101…US-115), CR-02, and the open items.
+> **Lens:** TPO · **Updated:** 2026-10-04 (fifth pass — US-010/US-012 built; Batch 6 complete) · **Scope:** every workstream — the SDLC plan (Stages 0–11), the D4 build (US-001…US-030), CR-01 (US-101…US-115), CR-02, and the open items.
 > **Companion to:** `plan-state.md` (plan checkpoint) and `change-requests/STATUS.md` (CR-01 build checkpoint). This file is the **whole-of-work** view across all of them.
 
 # Work Status — ANITA MEDICAL SYSTEMS
@@ -12,13 +12,22 @@ occurrence of the word "status" in that directory is code-level (a DB column, an
 The statuses below are therefore **derived from build evidence**, in this order of precedence:
 
 1. The module exists in `platform/app/anita/` and its test file passes.
-2. The **route is actually served** — a module that exists but has no route is not `COMPLETED`.
+2. **A live caller actually reaches it** — a module that exists, or that only tests construct, is
+   not `COMPLETED`. "Reachable" was verified by tracing call sites, not by trusting the docstring.
 3. The deferrals declared in `config/anita.yaml` → `release.deferred_use_cases`, with their reasons.
 4. `scripts/system_check.py` and `scripts/release_gate.py` output.
 
 Where code is migrated but not wired, this file says so rather than recording it as done. That
 distinction is the whole point of the exercise: the plan-level scorecard (`08-coverage-verification.md`)
 is at 100 %, and it explicitly states it "measures *plan* completeness, not product readiness".
+
+**This revision is the result of a call-site audit of the whole platform (2026-10-04, evening).**
+Every story was re-derived by tracing who constructs it and who calls it from a served route or the
+media-stream path — not by reading module docstrings. Four stories that were previously `COMPLETED`
+are demoted here because their live path does not exist (`US-010`, `US-012`, `US-014`, `US-015`),
+along with four more whose wiring is broken or partial (`US-004`, `US-006`, `US-025`, `US-027`).
+The audit also produced a defect list — see §8. Nothing in this file should be read as worse news
+than it is: the *product* works; what changed is the honesty of the label on each story.
 
 ### Status legend
 
@@ -34,19 +43,36 @@ is at 100 %, and it explicitly states it "measures *plan* completeness, not prod
 
 | Status | Count | Items |
 |---|---|---|
-| `COMPLETED` | **32** | 22 of US-001…US-030 · 10 of US-101…US-115 · Stages 0–11 |
-| `IN PROGRESS` | **8** | US-001 (see §3a), US-002, US-003, US-008, US-016, US-017, US-018, US-021 |
-| `BLOCKED` | **1** | CR-02 (needs decisions Q9–Q12) |
-| `YET TO START` | **5** | DG-06 operational config · DG-08 legal review · U-1 · U-2 · U-3 (all in §6) |
+| `COMPLETED` | **38** | 28 of US-001…US-030 · 10 of US-101…US-115 · Stages 0–11 |
+| `IN PROGRESS` | **1** | US-001 — the transport is built and a simulated call has carried it; a real carrier call is the one remaining item (§3a) |
+| `BLOCKED` | **2** | US-021 (outbound worker — held for DG-08) · CR-02 (needs decisions Q9–Q12) |
+| `YET TO START` | **4** | DG-08 legal review · U-1 · U-2 · U-3 (all in §6). DG-06's code *and* config are now complete — only the real-call confirmation in §3a remains |
 | `NOT FEASIBLE` | **0** | Nothing in the plan is infeasible — the feasibility verdict is **Feasible** |
 
-Stories: 22 + 8 = 30. `NOT FEASIBLE` is genuinely zero: `FEASIBILITY-STUDY.md` §1 returns
+Stories: 14 + 15 + 1 = 30. `NOT FEASIBLE` is genuinely zero: `FEASIBILITY-STUDY.md` §1 returns
 "Feasible. Recommended, with two blocking conditions before public launch."
 
 **US-001 moved from `BLOCKED` to `IN PROGRESS` on 2026-10-04.** The previous entry said it was
 blocked on provisioning a Twilio number. That was incomplete: the number was necessary but nothing
 like sufficient — `voice.py` had never executed a single turn. See §3a for what was actually wrong
-and what has since been fixed.
+and what has since been fixed. As of this revision the whole transport is built and has carried a
+**simulated call end to end over the public tunnel**; what is still missing is a real carrier call
+(§3a).
+
+**Why the completed count fell from 32 to 24.** Nine stories that the previous revision marked
+`COMPLETED` are now `IN PROGRESS` or `BLOCKED` because the 2026-10-04 audit traced call sites
+rather than reading modules: US-004, US-006, US-010, US-012, US-014, US-015, US-025 and US-027 were
+built and tested but have no live path (or a broken one), and US-021 was re-classed `BLOCKED`
+because it is deliberately held for the legal review. Conversely US-016 was promoted to
+`COMPLETED`: the media-stream relay now reaches the real STT leg, and a simulated call proved it
+end to end. The product itself did not regress — the labels caught up with the code.
+
+**And why it is back up to 38.** The demotions were a to-do list, not a verdict. US-014/US-015
+(prose leg), US-002/US-003/US-008 (messaging + browser voice), US-004/US-006 (identity +
+persistence) and now US-010/US-012 (index lifecycle + provenance) have since been built, wired to a
+served route, driven live, and re-promoted — each with the demotion's own complaint as the
+acceptance test. One story remains `IN PROGRESS`: US-001, whose transport is built and exercised by
+a simulated call, with the real carrier call as the single outstanding item.
 
 ---
 
@@ -80,81 +106,81 @@ not a claim that the product is launch-ready; §6 of this file covers what is ac
 
 | Story | Status | Comment |
 |---|---|---|
-| US-001 PSTN voice end to end over Twilio Media Streams | `IN PROGRESS` | **Build started 2026-10-04 — see §3a.** Number provisioned (`+12792365960`, E.164). The answer path now works end to end and is proven. Still missing: the three routes (`POST /twilio/voice`, `POST /twilio/status`, `WS /twilio/media-stream`), the TwiML builders, and the media-frame relay — note `voice.py`'s docstring references `handle_media`, which **does not exist anywhere** |
-| US-002 Web chat, WhatsApp and a configurable extra channel | `IN PROGRESS` | Web chat works. The WhatsApp adapter **is registered** in the channel gateway, but no webhook route is served, so an inbound message has nowhere to land. Deferred until the text + lead product is validated with real buyers over web chat |
-| US-003 Browser-mic behind a hardened public edge | `IN PROGRESS` | **Hardening is built** — `validate_twilio_signature()` and `RateLimiter` in `channels.py`. The admission-ticket route **is** served (`Route.VOICE_TICKET`), but there is no audio path behind it: a ticket is issued and nothing consumes the audio |
+| US-001 PSTN voice end to end over Twilio Media Streams | `IN PROGRESS` | **Transport complete and exercised by a simulated call — see §3a.** All three routes are served (`POST /twilio/voice`, `POST /twilio/status`, `WS /twilio/media-stream`, `server.py:159,163,169`), the webhook validates the raw signed form and admits before TwiML (`voice_webhook.py:128-178`), the relay decodes µ-law frames and drives the engine (`media_stream.py:170-220`), and the channel tables give replay protection and attribution (`channel_store.py`). `logs/instance.log.err` records a full simulated call through the public tunnel: 80 frames → real faster-whisper transcript → deterministic answer → Kokoro TTS → clean close. **What is missing is a real carrier call** and `T-01…T-17`. Secondary gap: the WebSocket performs no admission of its own, so a direct `wss://…/twilio/media-stream` connection bypasses the call ceiling (§8.6) |
+| US-002 Web chat, WhatsApp and a configurable extra channel | `COMPLETED` | **Built out 2026-10-04.** `POST /twilio/whatsapp` is served and driven end to end: signature → attribution → `MessageSid` dedupe (ten deliveries → one reply, one turn) → content taxonomy (voice note declined with a text prompt, unsupported files explained, media-without-caption asked for context) → the same answer engine as web chat, grouped on the sender's number → rendered by the originating adapter → `outbound_send`. The outbox implements TRD-04 as specified: 5 attempts on 5 s → 30 s → 2 m → 8 m → 15 m, a failed row never deleted, transient vs permanent classified by the sender, and `FAILED` rows visible at `GET /api/admin/sends` + the console's sends panel. `ChannelGateway.accept()` now has runtime callers. The extra channel (UC-14) is a config change: `AdapterRegistry` declares→validates→probes→enables idempotently, a dead provider disables *only* that adapter, HMAC is checked over the raw body, and `POST /channels/{channel_id}/inbound` answers it. `system_check` drives UC-02 (answered and queued) and reports UC-14 as NOT CONFIGURED — no extra channel is enabled on this instance. Residuals: the answer is composed on the webhook thread (measured ~0.3 s on the deterministic path; TAC-2's 150 ms ack assumes the story's async split, which the outbox makes possible but does not yet do), and WhatsApp media is recorded, not fetched into the corpus |
+| US-003 Browser-mic behind a hardened public edge | `COMPLETED` | **Built 2026-10-04.** `WS /voice/browser` is served (`server.py`): the token arrives in the **first frame** (never the URL — TAC-8), is verified against a signed, expiring HMAC token before any audio is read, and the socket closes with the story's own codes — `4001` token, `4002` admission, `4008` rate limit. Admission runs against the *same* controller as PSTN (`TAC-7`), and a refused session opens no media pipeline. The ticket is a signed token now, and it **forecasts without reserving** (`AdmissionController.peek`): a buyer who denies the microphone after minting one costs no capacity — the WebSocket handshake is the commitment. 30 s idle close with `close_reason='idle'`, session rows carry `close_reason`, `rejected_ingress` counts refusals by class, `rate_limit_event` stores a salted hash. Verified live: both e2e scenarios pass on desktop + mobile against a fresh instance, and the store shows a `browser_mic` session opened and closed `client_stop`. Residual: with `ANITA_SESSION_SECRET` unset the signing key is per-process — a token minted before a restart stops verifying (boot says so; set the key for the reconnect window to survive a deploy) |
 
 ### MOD-02 Conversation Orchestrator
 
 | Story | Status | Comment |
 |---|---|---|
-| US-004 Cross-channel conversation identity | `COMPLETED` | `orchestrator.py`; recognised across channels, thread stays coherent |
-| US-005 Question classification and routing | `COMPLETED` | Commercial → SQL, catalogue → retrieval, clinical refused |
-| US-006 Turn serialisation and transcript persistence | `COMPLETED` | Every turn ordered, persisted, reviewable |
+| US-004 Cross-channel conversation identity | `COMPLETED` | **Built 2026-10-04.** Identity now resolves with the story's precedence — phone > handle > session > anonymous — and normalises at the boundary: `98200 11122`, `+91 98200 11122` and `0091-9820011122` are one key (the +91 bridge is what makes the story's own AC-1 possible, and it is documented as the one assumption). The registry survives its own restart via the database fallback inside the idle window (`AC-2`, `AC-6`), a stale thread yields a **child** conversation carrying `parent_conversation_id` (`AC-4`), ten duplicate starts return one conversation (`AC-5`), and an anonymous session never merges (`AC-3`). `identity_link` is unique on `(type, value)` so two channels linking one number converge by constraint (`TAC-4`); the voice path finally forwards the caller's number (`media_stream.py` read it and dropped it), and lead capture writes the phone the buyer *supplied* onto the conversation so the orchestrator links it. **Verified live:** chat price question → lead captured with a number → a voice turn from that number answered *"The minimum order quantity for Ultrasound Gel is 10 Pieces"* with the product resolved from the web-chat context, and an unknown product still declines. Residual: conversation rows are per identity, and a session-keyed chat thread joins a phone-keyed call thread through the **lead** plus seeded context rather than being one row — the LLD's "three conversations linked" model, chosen over BRD-01's single-thread reading because the numbers that exist mid-flight (a per-tab session id) cannot merge without one |
+| US-005 Question classification and routing | `COMPLETED` | `orchestrator.classify()` rules + fail-safe; commercial → SQL, catalogue → retrieval, clinical refused; live on chat and voice. US-006 persists the classification and route on every turn now, closing the "recorded only in memory" gap. **One AC gap found and fixed while wiring US-004:** a follow-up fact question that named no product ("and the price?") declined, because product resolution read only the current message — US-002's AC-2 was never actually implemented. Fixed with a guarded fallback to the product the conversation was already about (`answer_engine._follow_up_product`), which declines as before when the message names something unrecognised. Noted gaps: no LLM-assist fallback for the classifier |
+| US-006 Turn serialisation and transcript persistence | `COMPLETED` | **Built 2026-10-04.** `conversation_store.py` owns `conversation`, `identity_link` and `turn`; `seq` is assigned `MAX(seq)+1` inside `BEGIN IMMEDIATE` with `UNIQUE (conversation_id, seq)` and `UNIQUE (provider_event_id)` enforced by the database (`TAC-2`). The whole turn now runs under a per-conversation single slot (`ConversationQueue`, depth 20 from config) — the audit's `[user A, user B, assistant B, assistant A]` reproduction is a test that fails without it — with overflow re-prompting rather than dropping. A store failure buffers into a bounded `ReplayQueue` (capacity from config, drop-oldest counted) and the buyer still gets the answer (`AC-4`); the `ConversationJanitor` sweeps idle conversations, writes idempotent summaries (`TAC-5`, guard on `summary_updated_at`) and drains replay. The review read model pages at 100 with a cursor (`AC-6`), distinguishes `present` / `empty` / `expired` and labels an expired transcript with its date (`AC-7`), and the console renders both, with handoffs and the summary. **Verified live:** three chat turns persisted with classification and route per turn; **48-turn transcript with contiguous seq 1…48 read back through a restarted instance**; `system_check` reads 11+ persisted conversations. Residuals: SQLite shares one connection between reads and writes, so `TAC-7`'s "separate pool" is not claimed (recorded in the module docstring); retention is a hook (`expire_transcript`) that MOD-06's policy will call, not a scheduled job |
 
 ### MOD-03 Retrieval & Grounding
 
 | Story | Status | Comment |
 |---|---|---|
-| US-010 ANITA-only index build and validate | `COMPLETED` | `index.py` — promoted only on passing validation, atomic promotion (`SM-05`) |
-| US-011 Hybrid retrieval with a grounding gate | `COMPLETED` | `retrieval.py` — `MiniBM25`, weighted RRF 0.65/0.35, `GroundingGate` |
-| US-012 Provenance and honest absence | `COMPLETED` | `corpus.py` — read-only SQLite, explicit absence, caveat guard |
+| US-010 ANITA-only index build and validate | `COMPLETED` | **Built 2026-10-04.** The lifecycle now has a production caller and a memory: `scripts/rebuild_index.py` drives begin → embed → validate-against-the-frozen-set → promote-or-reject, and `SqliteBuildStore` persists `anita.index_builds` with the story's **partial unique index** (`UNIQUE (collection) WHERE state = 'LIVE'`) — so a double promotion is a database error, not a rule someone remembers. Promotion is a single transaction (demote the old LIVE, write the new) and the **live collection is a pointer** the serving process reads: `assembly` asks the store which collection is live, so a promotion takes effect for every process at the moment it commits. A restart remembers the live collection and continues version numbering; a failed gate leaves the previous build serving. Boot now **refuses** when there is no index and no promoted build (`SM-05` edge 1) with a message naming the rebuild command. **Verified live:** two rebuilds promoted `anita_ams__v1` → `__v2`, each 4.3 s (TAC-2 budget 10 min) with 70/70 on the frozen set before promotion; a fresh instance logged `index pointer: serving promoted collection anita_ams__v2`; and **20/20 queries were served while a rebuild promoted `__v4` in the background** (TAC-4, 0 failures), with every superseded build retained in the history. Residuals: the column type is SQLite dialect (`CR-02` moves it); the collection name is not yet surfaced on the admin console |
+| US-011 Hybrid retrieval with a grounding gate | `COMPLETED` | `MiniBM25` + weighted RRF 0.65/0.35 + `GroundingGate`, live by default (`rag.backend: shared`); `ANITA_RAG_BACKEND=memory` rollback proven. Minor: fusion weights are hardcoded, not config-read, and the shared service's `degraded` flag is dropped by the adapter |
+| US-012 Provenance and honest absence | `COMPLETED` | **Built 2026-10-04.** `coverage.py` is the single definition of "published", keyed **per product id**: it returns exactly `{270685, 270687, 381893}` with no specs and `{270683, 3935251, 3935247, 3935249}` with no About, asserted against the live corpus, and derived rather than cached so a refreshed corpus flips it with no code change. The engine consults it **before retrieval** — so a product the catalogue stocks but has not documented is answered *"ANITA has not published specifications for Microbar Paste yet…"* with a human offer and **0 LLM calls** (`TAC-4`), instead of the old *"I don't have that in our catalogue"*, which told buyers we do not sell what we do sell. Every grounded reply now carries `grounded_on` (chunk id, type, product, source URL, content hash — the existing TRD-16 payload, finally surfaced); the content hash and ids are stored on the turn so the console review renders the grounding per turn. `citation_incomplete` is counted, and the release gate now runs the frozen set a second time counting citations: **55 grounded answers, 0 uncited, 0 incomplete** — it found and fixed two real defects on the way (the listing answers were uncited; a record citation without a URL was being misflagged). **Corpus-vs-story note:** the story's edge 11 says one "Medical Dry Imager" has About and the other does not — against the live corpus **both** lack About; the test asserts the true property (per-id independence) and records the discrepancy rather than the story's version. Residuals: the probe is not yet exposed on the admin console; named-spec-level emptiness (a spec row with a blank value) is handled by the corpus lookup, not by the probe |
 
 ### MOD-04 Inference & Answer Composition
 
 | Story | Status | Comment |
 |---|---|---|
-| US-013 Deterministic price / MOQ / delivery with caveat | `COMPLETED` | `answers.py` — fact registry, `ProductResolver` (Resolved/Ambiguous/NotFound), structural caveat enforcement |
-| US-014 Grounded prose, clause-streamed for voice | `COMPLETED` | `llm.py` + `prompts.py` — Ollama/MLX backend, `ClauseCutter`, numeric-grounding verification |
-| US-015 Keep selling when the model is down | `COMPLETED` | Circuit breaker; SQL answers survive, prose declines with a handoff |
+| US-013 Deterministic price / MOQ / delivery with caveat | `COMPLETED` | `answers.py` — fact registry, `ProductResolver` (Resolved/Ambiguous/NotFound), caveat appended in the same function that produces the figure; live on chat and voice, with no LLM on the path. Noted gap: the `corpus.caveat_violations()` boot guard exists but is **never called at boot** |
+| US-014 Grounded prose, clause-streamed for voice | `COMPLETED` | **Done 2026-10-04 — wired per the recorded decision (deterministic-first; prose only for open questions).** The backend is now **constructed at assembly** (`OllamaBackend` from the configured model, with a breaker) and injected into the one shared answer engine, so the prose leg and the breaker are no longer a library island. `AnswerEngine._compose_prose` is tried at **exactly one place** — the fall-through where an open question would otherwise be answered with the top chunk verbatim — and nowhere else: price, MOQ, delivery, spec, company facts, refusals and declines all answer before it is reached. Generated text is checked by `prompts.verify_answer` against the same context the prompt carried (numeric grounding + the BRD-06 caveat), so a fabricated figure or a price without its caveat is rejected and the verbatim answer stands. **Evidence:** `pytest tests -q` → **948 passed** (9 new: grounded accepted, fabricated figure rejected, missing caveat rejected, dead model falls back, verbatim answer survives, the fall-through uses prose, a decline never reaches the model); **live** against the real Ollama and the real corpus — *"what is the ultrasound gel used for?"* → 7.8 s, `accepted=True`, breaker closed, prose naming the gel's use. **Residuals:** the configured model (`qwen2.5:14b`) does not answer inside the backend's 60 s timeout on this CPU-only host, so the live demo used `llama3.2:3b`; the prose is not yet covered by the frozen evaluation set (US-027's set predates the leg) |
+| US-015 Keep selling when the model is down | `COMPLETED` | **Done 2026-10-04.** With the backend live, the breaker actually runs: every prose failure — breaker open, timeout, transport error, empty generation, grounding rejection — is swallowed in `_compose_prose` and the caller keeps the deterministic or verbatim answer, so a dead model degrades **prose and nothing else**; the commercial path never touches the model at all (asserted: zero model calls during a price question, live). Breaker state is now on every turn's record (`llm_configured` / `llm_available` in the chat trace), so "the answer was verbatim" can be told apart from "the model is down" after the fact. **Defect found live while wiring this:** `OllamaBackend`'s default `keep_alive="-1"` is rejected by Ollama with HTTP 400 (`time: missing unit in duration`) on *every* request — a default-only trap that reads as a model fault; the default is now `-1m` (the configured value always was) with a test pinning the unit. **Residuals:** no console metric for the breaker (the trace carries it); no provider probe or first-token retry beyond the breaker's cooldown |
 
 ### MOD-05 Speech Services
 
 | Story | Status | Comment |
 |---|---|---|
-| US-016 STT: 20 ms frames, VAD, 600 ms floor | `IN PROGRESS` | `speech.py` migrated; **no live route** — same media gap as US-001 |
-| US-017 Clause TTS with immediate barge-in stop | `IN PROGRESS` | Same media gap |
-| US-018 VRAM admission, degrade voice before text | `IN PROGRESS` | `voice_admission.py` migrated; same media gap |
+| US-016 STT: 20 ms frames, VAD, 600 ms floor | `COMPLETED` | **Promoted from `IN PROGRESS`.** The media-stream relay now reaches the real STT leg (`media_stream.py:194` → `voice.py:1157` → `_transcribe`), and the simulated call transcribed `"How much is the ultrasound gel?"` with faster-whisper on CPU. Noted: `speech.EndOfSpeechTracker` is a parallel unused implementation, and the fixed-response refusal path is effectively silent |
+| US-017 Clause TTS with immediate barge-in stop | `COMPLETED` | **Done 2026-10-04.** Clause TTS was live; barge-in was not. Now: the clause loop checks the cancel signal **per clause** and stops before the next one — raising the engine's own `GenerationCancelled`, so the tail is not flushed either; `_synthesise_streamed` and the TTS producer generator stop mid-clause on the same signal, and a partial is never cached; the relay sends Twilio `clear` on the **transition** into an interruption only (echo and muted frames do not; the caller's continuing speech does not re-signal), so the buffered audio actually stops; and the transcript marks the answer truncated — `note_answer_truncated()` finally has a caller, and is a no-op on the streamed path where the history already holds only what was heard. **AC-4** is implemented with it: a clause that fails to synthesise is retried once, then the human-transfer offer is spoken rather than silence. **Evidence:** `pytest tests -q` → **917 passed** (15 new); the audit's reproduction — interrupt after clause 1 and all clauses are still spoken — is now the test that fails without the fix. **Residuals:** AC-1's ≤300 ms first-audio and AC-2's ≤150 ms stop-to-silence budgets are engine-side only until the real carrier call (Batch 3) — the trace now carries the data to measure them; the `clear` round trip to Twilio is unmeasured |
+| US-018 VRAM admission, degrade voice before text | `COMPLETED` | **Done 2026-10-04.** Three gaps closed: (1) **the ladder now moves** — `anita/capacity.py` samples device free memory (nvidia-smi; `None` means *not measurable* and the policy then does nothing rather than guessing), publishes `gpu_free_mib` to the metrics registry (previously registered unavailable and never written), and walks the ladder down when the **sibling's floor** is threatened and back up only with headroom (`HYSTERESIS_MIB=512`, so a box at the threshold does not flap). Order is the story's: `voice_shed → stt_off → tts_off → chat_degrade → commercial_only`, and a shed rung refuses the next call while text stays available. (2) **The configured capacity numbers reach the controller** — `vram.anita_budget_mib` / `shared_card_mib` / `sibling_floor_mib` were read by nothing and the controller ran on dataclass defaults; now they are passed (TAC-7's "an unread capacity key is decoration"). (3) **The boot claim is true** — a host without a CUDA device is **capped at 1 concurrent call** (`CPU_CONCURRENT_CALLS`; CPU synthesis is ~0.6× real time), not "refused at admission" as the report used to claim with no code behind it; voice still works, which the simulated call proved. The monitor is started only where there is a device to read — on CPU there is no VRAM to shed, and a monitor would be theatre. **Evidence:** `pytest tests -q` → **938 passed** (11 new: the ladder order, voice-first shedding, refusal on a shed rung, recovery with hysteresis, unmeasurable-is-not-pressure, metric publishing, config-to-controller, the CPU cap, and boot-report-matches-behaviour). **Residuals:** the sampler's 5 s cadence and the 30-minute soak (TAC-2) need a GPU host — no CUDA device exists on this machine, so the pressure path is proven with a forced source, not with real memory pressure; the capacity trace (TAC-5's "visible in the trace") is the `gpu_free_mib` metric plus the logger, not a durable capacity-events table |
 
 ### MOD-06 Lead & Mock CRM
 
 | Story | Status | Comment |
 |---|---|---|
-| US-019 Lead capture and dedupe | `COMPLETED` | `leads.py` |
-| US-020 Mock CRM behind a swappable interface | `COMPLETED` | `crm.py` — `CrmStore` Protocol |
-| US-021 Outbound queue and dialling worker | `IN PROGRESS` | `OutboundQueue` **is built** — window and attempt limit checked at claim time, `SELECT … FOR UPDATE SKIP LOCKED` semantics, abandoned-row reaping. **No worker dials.** Held deliberately: placing calls to real buyers needs the DG-08 compliance review to close first |
-| US-022 Handoff records and rep notification | `COMPLETED` | Real `Handoff` opened against the CRM (added by US-114) |
+| US-019 Lead capture and dedupe | `COMPLETED` | `leads.py`; dedupe by phone/email backed by unique partial indexes in the store. Noted: only `web_chat` is ever passed as the channel label |
+| US-020 Mock CRM behind a swappable interface | `COMPLETED` | `crm.py` — `CrmStore` Protocol, SQLite implementation, outbox. The seam is duck-typing only; no second implementation and no config-driven selection |
+| US-021 Outbound queue and dialling worker | `BLOCKED` | `OutboundQueue` **is built** — window and attempt limit checked at claim time, `SELECT … FOR UPDATE SKIP LOCKED` semantics, abandoned-row reaping — but it is instantiated **only in tests**. No worker, no dialler and no route to trigger one exist anywhere in the repo. Held deliberately: placing calls to real buyers needs the DG-08 compliance review to close first. UC-09 is unreachable |
+| US-022 Handoff records and rep notification | `COMPLETED` | **Done 2026-10-04.** The audit's three defects, all fixed: (1) `crm.record_handoff` **assigns the id** when the caller passed none — the empty string used to be inserted verbatim, so the first handoff took the empty PRIMARY KEY and every later one died on the UNIQUE constraint, swallowed into `dispatched=False` (**one handoff per database lifetime**); (2) the handoff carries a real `conversation_id` on its own field (guarded `ALTER TABLE` migration for existing DBs) and `surfaces.py` passes the true `lead_id` — empty when the buyer gave no contact details, never a conversation id masquerading as a lead; anonymous escalations dedupe per conversation, known leads per lead; (3) **notification exists**: `anita/notify.py` emails the rep over SMTP (`SMTP_HOST`/`SMTP_PORT`/`SMTP_USER`/`SMTP_PASS`/`SALES_NOTIFY_EMAIL`, DG-12's email default), a delivered notification moves the handoff to `state='notified'` with `notified_at`, and a missing or broken notifier leaves it **open** without failing the turn — `EscalationRecord.notified` keeps "we escalated" and "somebody knows" as separate facts. (4) `GET /api/admin/handoffs` behind the bearer boundary serves the queue, with an **Escalations** panel on the console page showing the open count. **Evidence:** `pytest tests -q` → **927 passed** (10 new, incl. two handoffs for two leads — impossible before this change); `system_check` → 16 passed · 0 failed · 5 deferred. **Residual:** with no SMTP configured the boot report says so and handoffs stay `open` — honest, but a deployment must set the keys for the rep to be reached |
 
 ### MOD-07 Sentiment & Escalation
 
 | Story | Status | Comment |
 |---|---|---|
-| US-023 Per-turn sentiment scoring | `COMPLETED` | Rule-based fallback always works — preserved through the CR-01 merge |
-| US-024 Composite, category and same-turn escalation | `COMPLETED` | Escalation reaches a real sink; idempotent per lead |
+| US-023 Per-turn sentiment scoring | `COMPLETED` | Rule-based fallback always works — preserved through the CR-01 merge. Noted: scoring is **chat-only**; voice turns are never scored |
+| US-024 Composite, category and same-turn escalation | `COMPLETED` | Escalation reaches a real sink wired in assembly; idempotent per lead |
 
 ### MOD-08 Observability & Evaluation
 
 | Story | Status | Comment |
 |---|---|---|
-| US-025 Dependency-free per-turn trace | `COMPLETED` | `observability.py` — stages, timings, retrieval outcome |
-| US-026 Admin console read API | `COMPLETED` | Health, conversation review, honest absence |
-| US-027 Frozen eval set and release quality gate | `COMPLETED` | 70 cases, all passing |
+| US-025 Dependency-free per-turn trace | `COMPLETED` | **Done 2026-10-04.** `new_trace(call_id, turn)` accepts the engine's positional call (`voice_trace.py`); `TurnTrace` gains `mark()`/`note()`/`stages_seen`/`durations_ms` — absent-not-zero (TAC-3), duplicate marks counted, non-numeric counters refused (the PII guard, TAC-4), backwards clocks clamped and flagged; the relay emits on every turn outcome (`media_stream.py`) and chat emits `turn_received → answer_composed → sentiment_scored → outcome` (`surfaces.py`); `JsonlSink` rotates 100 MB × 7 (TAC-5) and a failing sink is counted, never raised (TAC-1). `assembly.py` now passes a real `JsonlSink` — it had passed a bare `Path`, so every emit silently `AttributeError`-ed — and installs the writer into the voice seam. **Evidence:** 11 new tests incl. a driven end-of-speech trace and the stdlib-only import guard; `pytest tests -q` → **886 passed**. **Residual:** emission is one synchronous append, measured at **0.36 ms/turn** — inside the ≤2 ms budget (TAC-2) but not the literal "zero blocking I/O"; a background writer is the remaining refinement |
+| US-026 Admin console read API | `COMPLETED` | Health, conversation review, metrics and gate endpoints, all behind the bearer boundary. Noted: conversation review returns no sentiment, so UC-12/13 drill-down is thinner than the story; traces are exposed to no handler |
+| US-027 Frozen eval set and release quality gate | `COMPLETED` | **Done 2026-10-04.** The set is now a versioned repo file — `eval/anita_frozen_set.jsonl`, 70 cases, SHA-256 pinned in `config/anita.yaml` (`release.eval_set_sha256`) — and `assembly._build_release_gate` loads it through `load_eval_set()`, **fails closed** on a missing file, an empty set or a hash mismatch, and stamps the digest on every report (TAC-1). `cases_from_corpus()` no longer runs at boot. Regeneration is a reviewed act: `scripts/freeze_eval_set.py` shows the added/removed case ids on a dry run and only writes with `--write`. The `QualityGate` false-green is fixed: the verdict is derived, and a tolerated non-critical failure is named in `reason` instead of being reported as "all N cases passed". The missing operational entry point exists: `scripts/rebuild_index.py` drives `IndexLifecycle` through `begin → embed → validate(frozen set) → promote/reject`, so a rebuild is gated and rejection leaves the live index serving (`--dry-run` validates what is live). **Evidence:** `pytest tests -q` → **896 passed** (10 new); `release_gate.py --no-browser` → 70/70 PASS from the frozen set; `rebuild_index.py --dry-run` → `PASS — all 70 cases passed`, exit 0. **Residuals:** the story's 90-case figure is aspirational (the frozen set is the 70 the gate always ran); VOID is not a distinct verdict — an unreachable engine fails every case and blocks via the critical rule (TAC-3 holds); the boot path still builds the dense index lazily through `rag_adapter` without versioned collections, so the validated promotion is an explicit operator action rather than the boot path |
 
 ### MOD-09 Configuration, Isolation & Boot
 
 | Story | Status | Comment |
 |---|---|---|
-| US-028 Typed config, boot refuses unread keys | `COMPLETED` | Catches keys set but never read; typed parsers never fall back silently |
+| US-028 Typed config, boot refuses unread keys | `COMPLETED` | Catches keys set but never read; typed parsers never fall back silently. Declared-but-unread keys are `PENDING` by design, not refused |
 | US-029 Isolation guard, refuse to boot | `COMPLETED` | Verified live: a copy-pasted sibling config (`ANITA_DB_NAME=admissions`, ports 8000/8501) is refused with exit code 2, naming the resource, both values and the fix |
-| US-030 Platform detection, secrets, preflight | `COMPLETED` | Secrets masked in every render; a refused boot leaves no artifact behind |
+| US-030 Platform detection, secrets, preflight | `COMPLETED` | Secrets masked in every render; a refused boot leaves no artifact behind. Noted: `voice_capable=False` is reported but, as of US-018, does not actually refuse voice at admission |
 
 ### MOD-10 Client Surfaces
 
 | Story | Status | Comment |
 |---|---|---|
-| US-007 Responsive web chat surface | `COMPLETED` | 50/50 browser scenarios pass, desktop **and** mobile |
-| US-008 Browser voice client, typing one tap away | `IN PROGRESS` | Same media gap as US-003 — the ticket route is served, the audio path is not |
-| US-009 Admin console behind a login | `COMPLETED` | Bearer-token admin surfaces (UC-12, UC-13, UC-15) |
+| US-007 Responsive web chat surface | `COMPLETED` | Served at `GET /`; 86 markup/surface tests pass. **Qualification:** the "50/50 browser scenarios" evidence drives the **Streamlit** surface (`streamlit_app.py`, Streamlit selectors in `tests/e2e/scenarios.spec.js`), not `app/static/chat.html`, which has markup-level tests only |
+| US-008 Browser voice client, typing one tap away | `COMPLETED` | **Built 2026-10-04.** `chat.html` no longer records-and-discards: capture is the AudioWorklet (`static/pcm-worklet.js`, PCM16 @ 16 kHz — the frozen client contract), with a MediaRecorder fallback that sends the utterance then `commit`s the turn. Playback is one ordered queue of µ-law-decoded frames; `stop_speaking`/`flush` clears it. Every voice state is also a sentence in a `role="status"` region; permission-denied, no-device, busy, dropped and rate-limited all land in DEGRADED with the text chat usable and the callback number shown when the server supplied one. No storage is written (TAC-5), the token never travels in a URL, and reconnect is 1 s → 8 s within the 60 s window. The frame/close-code contract is frozen in `MOD-10` §B.3 and asserted by `test_static_surfaces.py` (contract) + `tests/e2e/voice.spec.js` (live, desktop + mobile) |
+| US-009 Admin console behind a login | `COMPLETED` | Bearer-token admin surfaces (UC-12, UC-13, UC-15); auth fails closed on an unset token. Noted: the story asked for a signed session cookie; the implementation is a bearer token held in `sessionStorage` |
 
 ---
 
@@ -174,12 +200,17 @@ test, and carried defects that would have failed on the first call.
 |---|---|---|
 | B1 | `audioop` was removed from the stdlib in Python 3.13; the venv is **3.14.7**. Every µ-law↔PCM frame conversion calls it | Installed `audioop-lts`, added to `requirements.txt`. **Verified**: 320 B PCM16 → 160 B µ-law → 320 B, RMS 14772 |
 | B2 | `scipy` imported unguarded by the TTS chunking path but never declared — it only worked transitively | Installed and declared. **Verified**: `scipy.signal.resample` works, 440 Hz tone survives |
-| B3 | **`import av` is blocked by Smart App Control** (`VerifiedAndReputablePolicyState = 1`) — 3 of PyAV's 67 extension modules. The FFmpeg DLLs are unaffected | Decision taken: disable Smart App Control. **Outstanding** — needs the Windows Security UI and a reboot |
+| B3 | **`import av` is blocked by Smart App Control** (`VerifiedAndReputablePolicyState = 1`) — 3 of PyAV 19.0.1's 67 extension modules. The FFmpeg DLLs are unaffected | ✅ **Resolved — PyAV 18, not a machine change.** The block was version-specific: 19.0.1 is refused, 18.0.0 imports across five releases measured in a throwaway venv. `av>=18,<19` is pinned with the finding in `requirements.txt`. Smart App Control stays on. The earlier "disable SAC or stub `av`" framing was wrong (commit `382622e`) |
 
 **Note on B2:** the `scipy` block was *transient*. Smart App Control blocks freshly-written binaries
 until they acquire reputation, so `scipy` failed minutes after `pip install` and passed later
-unchallenged. Only PyAV is persistently blocked (installed August, still refused). Worth knowing
-before diagnosing a future post-install import failure as a real problem.
+unchallenged. Worth knowing before diagnosing a future post-install import failure as a real problem.
+
+**STT is no longer blocked.** With `av` importable, the real chain was driven through the engine —
+`feed_audio` → VAD → `process_utterance` → `_transcribe` with real faster-whisper weights and the
+µ-law codec: `"how much is the ultrasound gel"` → `'Caller: How much is the ultrasound gel?'`,
+100 % word overlap. The `TestTheAudioScaleContract` guard added with that fix exists because an
+int16/normalised mismatch fails as a *hallucination*, not an exception.
 
 ### Wiring defects in `voice.py` (Phase C)
 
@@ -284,8 +315,9 @@ Now wired in `config.py::_environment`, with three properties, each tested:
 * A missing or malformed `.env` does not stop the boot; the file is a convenience, and anything
   missing is named by the boot report rather than guessed
 
-**Verified:** a full preflight now reports **one** degradation — `TUNNEL_HOST unset` — down from two.
-`TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER` (`+12792365960`) and `ANITA_ADMIN_TOKEN` all load.
+**Verified:** with `TUNNEL_HOST` now also set, the boot preflight reports **zero** degradations.
+`TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER` (`+12792365960`) and `ANITA_ADMIN_TOKEN` all load — see
+§7.
 
 ### The media-stream relay (`media_stream.py`, 2026-10-04)
 
@@ -308,7 +340,7 @@ remove.
 | Streamed audio is **not sent twice** | `process_utterance` returns the same frames it streamed; re-sending would speak every clause twice |
 | `mark` every 25 frames (~500 ms), not before | flow control |
 | Barge-in frames go to the gate; `FRAME_ECHO`/`FRAME_MUTED` are **not** fed | the assistant must not answer its own voice |
-| `clear` is sent so interrupted audio stops playing out of Twilio's buffer | without it, a working barge-in sounds broken |
+| `clear` can be sent to stop Twilio's buffered playout | ⚠ `clear_playout()` exists and is unit-tested (`media_stream.py:272`) but **has no caller in `app/`** — nothing sends `clear` on a live barge-in. See §8.4 |
 | `stop`, and an **abnormal drop**, both release the admission slot | AC-8 / SM-04 — a leaked slot makes the box refuse calls while idle |
 | `close` is idempotent and never releases another call's slot | |
 | No audio is sent after close; late frames are ignored | frames in flight during teardown |
@@ -349,17 +381,43 @@ on the same `CallSid` produces **exactly one** `accepted`; replay protection sur
 the real database file; a foreign number is refused **and** recorded as `rejected` without consuming
 capacity; and a broken store does not drop a call in progress.
 
+### The simulated call — the whole path, proven without a carrier (2026-10-04)
+
+`logs/instance.log.err` records a complete call over the **public tunnel**, driven by a simulated
+Twilio client (`CA-simcall-1`):
+
+```
+WebSocket /twilio/media-stream [accepted] → media stream: started
+  80 frames → USER_SPEECH_STOPPED (600 ms floor)
+  faster-whisper small.en on cpu → STT: "How much is the ultrasound gel?" (prob 1.00)
+  LLM/TTS: "Ultrasound Gel is listed at ₹60/Piece. This is the published list price, excluding
+            taxes; a formal quotation is required for an order."
+  media stream: closed (disconnect, 1 turn(s) transcribed)
+```
+
+A `POST /twilio/voice` through the tunnel returned **200** with valid signature, and the channel
+store holds the expected simulated identifiers (`CA-public-test-1`, `CA-verify-2c1b8167`,
+`MZ-simcall-1`) with `+12792365960` registered as an owned endpoint. So signature validation,
+attribution, admission-before-TwiML, the media relay, VAD, STT, the answer engine, clause TTS and
+teardown are all exercised on the real code path.
+
 ### Still to build for US-001
 
-1. **The STT leg cannot be exercised yet.** Everything either side of it is proven — the relay
-   protocol, the answer path, and Kokoro TTS (RTF 0.60) — but **µ-law → Whisper cannot run while
-   Smart App Control blocks `import av`**. Until that is off (B3 above) the full audio round trip
-   is untested, and a real call would fail at transcription.
-2. **Public ingress** — a Cloudflare tunnel, which is also what clears the remaining `TUNNEL_HOST`
-   degradation. Quick tunnels change hostname on every restart, so Twilio's webhook must be
-   re-pointed each time; the source had a `scripts/update_twilio_webhook.py` for this, which is
-   **not** in this repo.
-3. **Verification** — `T-01…T-17`, then a real call to `+12792365960`.
+1. **A real carrier call.** No real phone call has ever been placed — every CallSid on record is
+   simulated (`CA-simcall-1`, `CA-public-test-1`, …). Real Twilio CallSids are 34 characters; none
+   appear. `T-01…T-17` are outstanding, including the `T-17` three-call load test against the
+   2-slot admission ceiling.
+2. **The media-stream WebSocket enforces no admission of its own.** Admission happens only at
+   `POST /twilio/voice`; the WS handler accepts any connection and releases (never takes) a slot
+   (`server.py:169-196`, `media_stream.py:301`). In the carrier flow Twilio only opens the stream
+   after admitted TwiML, but the endpoint is publicly reachable through the tunnel, so a direct
+   connection drives STT/TTS without a slot. See §8.6.
+3. **Public ingress is operational, not fixed.** `start_services.ps1` and
+   `scripts/update_twilio_webhook.py` automate the tunnel → `TUNNEL_HOST` → webhook re-point
+   sequence, and `TUNNEL_HOST` is set. But a *quick* tunnel mints a new hostname on every restart;
+   a named tunnel or a domain would remove the class of problem. `docs/twilio-voice-setup.md` is
+   the runbook — note its "What is still missing" section is stale (it says TAC-6/AC-7 are not
+   implemented; they are).
 
 ### TAC-6 and AC-7 — implemented 2026-10-04
 
@@ -402,6 +460,8 @@ forgotten to list, which is the guard working.
 
 **10 / 10 stories `COMPLETED`. Integration checkpoints C1–C9 all `PASS`.**
 Full per-story evidence lives in `change-requests/STATUS.md`; this is the roll-up.
+All ten were independently re-verified on 2026-10-04 — with one live defect found in US-114's sink
+(§8.1), which is a runtime bug in delivered work rather than a failure of the extraction.
 
 | Workstream | Stories | Status | Headline evidence |
 |---|---|---|---|
@@ -413,17 +473,27 @@ Full per-story evidence lives in `change-requests/STATUS.md`; this is the roll-u
 | Sentiment | US-111 Shared sentiment core extraction | `COMPLETED` | `anita/sentiment.py` is now a facade; all 16 public names verified; `test_mod07` 51 tests unaffected |
 | Sentiment | US-112 Sentiment config actually read | `COMPLETED` | Threshold collapsed from four literals to one constant, still operator-tunable (CV-12) |
 | Sentiment | US-113 Fix unreachable Hot category | `COMPLETED` | **Fixed, not ported.** Measured boundary recorded: rule-based "ready to order" scores 0.290 against a 0.3 bound — 0.01 short |
-| Sentiment | US-114 Escalation with a real sink | `COMPLETED` | **UC-10 `DEFERRED` → `PASS`**; two wiring defects fixed |
+| Sentiment | US-114 Escalation with a real sink | `COMPLETED` | **UC-10 `DEFERRED` → `PASS`**; two wiring defects fixed. ⚠ Re-audit 2026-10-04: the sink opens a `Handoff` but the empty `handoff_id` means **only the first handoff ever succeeds** — see §8.1 |
 | Sentiment | US-115 Sentiment store Protocol | `COMPLETED` | Injected, never global; two cores proven independent |
 
 **New code introduced:** `shared/rag` (8 files) and `shared/sentiment` (6 files) — product-agnostic,
 neither imports `anita.*`. ANITA consumes both through `anita/rag_adapter.py` and the sentiment facade.
+
+**Independently re-verified 2026-10-04:** both packages exist, the AST scan over all 13 shared files
+finds zero `anita.*`/`app.*` imports, the adapter is live by default and the `memory` rollback is
+proven. Two small defects, neither affecting the verdict: `shared/sentiment/core.py:35` still names
+its logger `"anita.sentiment"` (a product-name leak, not an import), and `change-requests/STATUS.md`
+§"store integration matrix" still marks all four stores `NOT STARTED`, contradicting US-103 and
+US-115 which are done.
 
 ---
 
 ## 5. CR-02 — Production infrastructure (Postgres + Docker)
 
 **Status: `BLOCKED` on decisions Q9–Q12.** Not started. Deliberately sequenced *after* CR-01.
+Verified 2026-10-04: no `Dockerfile`, compose file or `Postgres*Store` exists anywhere;
+`psycopg2-binary` is declared (`requirements.txt:18`) but imported by nothing; `DB_*`/`DATABASE_URL`
+appear only as known key *names* in `config_truth.py` and are read by no code.
 
 | # | Decision needed | Recommendation on record |
 |---|---|---|
@@ -451,7 +521,7 @@ failure came from the store swap or the module change. **CR-01 first, against SQ
 
 | Item | Status | Comment |
 |---|---|---|
-| **DG-06** Auth, rate limiting, Twilio signature validation | `YET TO START` (ops) — code `COMPLETED` | **Correction to the standing record.** `validate_twilio_signature()`, `RateLimiter` and admin bearer auth are **built and tested**; rate limiting is on by default in the gateway. What remains is configuration and operations: `TWILIO_AUTH_TOKEN` is unset, so the release gate correctly reports "degraded — inbound webhooks cannot be signature-verified". This is now a **deployment task, not a build task** |
+| **DG-06** Auth, rate limiting, Twilio signature validation | `COMPLETED` (code + config) — live confirmation pending a real call | `validate_twilio_signature()`, `RateLimiter` and admin bearer auth are built and tested. **`TWILIO_AUTH_TOKEN` and `TUNNEL_HOST` are now set in `.env`, and `.env` is actually loaded at boot** (`config.py::_environment`) — the preflight reports **zero** degradations. The earlier "TWILIO_AUTH_TOKEN is unset" note is obsolete. What remains: a real carrier call to confirm the signature path end to end |
 | **DG-08** Legal review of clinical-refusal wording | `YET TO START` | A human/legal task, not engineering. Blocks public launch, and blocks UC-09 outbound (calling real buyers) |
 | U-1 UC-10 A1 "buyer declines a human" | `YET TO START` | Deferred — needs a decline intent that does not exist in the evidence. `escalation_enabled` is the operator equivalent for now |
 | U-2 `MIN_LABELED_OUTCOMES` operator-tunable? | `YET TO START` | Currently a code default of 100 |
@@ -459,32 +529,86 @@ failure came from the store swap or the module change. **CR-01 first, against SQ
 
 ### Deferred use cases — by decision, not by defect
 
-Each carries a written reason in `config/anita.yaml` → `release.deferred_use_cases`:
+Each carries a written reason in `config/anita.yaml` → `release.deferred_use_cases`.
 
-| UC | Reason (abbreviated) |
+**⚠ The UC-03/UC-04 reasons in `config/anita.yaml` are now factually wrong** — they say "there is no
+voice route in the API at all" and "no media stream", and both statements were fixed on 2026-10-04.
+The deferral *decision* may still be right (no real call has been taken), but the recorded reason
+must be rewritten or the entry lifted; leaving it as-is makes the config file contradict the code.
+
+| UC | Reason (abbreviated, with 2026-10-04 corrections) |
 |---|---|
-| UC-02 WhatsApp inbound | Adapter registered, no webhook route. Until the text + lead product is validated with real buyers over web chat |
-| UC-03 Inbound voice call | No voice route at all; no carrier, no media stream, no barge-in under load. Until a Twilio number is provisioned |
-| UC-04 Browser-mic question | Ticket route served, no audio path behind it. Deferred with UC-03 — the same media path serves both |
+| UC-02 WhatsApp inbound | Adapter registered, **no webhook route** — still true. Until the text + lead product is validated with real buyers over web chat |
+| UC-03 Inbound voice call | Route, webhook, media relay and channel tables **are now built**; a simulated call has been carried end to end. Remaining: a **real carrier call** and `T-01…T-17`. The old reason ("no voice route at all") is stale |
+| UC-04 Browser-mic question | Ticket route served, **still no audio path** behind it. The Twilio media path does not serve the browser client; this remains open on its own merits, not on UC-03's |
 | UC-09 Outbound follow-up | `OutboundQueue` has no worker. Deliberate: calling real buyers needs DG-08 to close first |
 | UC-14 Additional messaging channel | An extension point rather than a trigger — verified by design review and the adapter interface, not by a driven test |
 
 ---
 
-## 7. Verification — run on this machine, 2026-10-04
+## 7. Verification — run on this machine, 2026-10-04 (evening pass)
 
 | Check | Command | Result |
 |---|---|---|
-| Unit suite | `.venv/Scripts/python -m pytest tests -q` | **747 passed**, 1 skipped, 0 failed |
-| Browser suite | `bash tests/e2e/run.sh` | **50 passed** (25 scenarios × desktop + mobile) in 1.7 m |
-| System integrity | `scripts/system_check.py` | **16 passed · 0 failed · 5 deferred** — 38 modules loaded, 11 dependencies wired |
-| Evaluation set | `scripts/release_gate.py --no-browser` | **70 / 70 cases passed** |
+| Unit suite | `.venv/Scripts/python -m pytest tests -q` | **1132 passed**, 1 skipped, 0 failed |
+| Browser suite (buyer chat, Streamlit) | `bash tests/e2e/run.sh` | **50 passed** (25 scenarios × desktop + mobile) — on a frozen tree, fresh instance |
+| Browser suite (browser voice, FastAPI page) | `bash tests/e2e/run_voice.sh` | **4 passed** (2 voice scenarios × desktop + mobile): denied-mic fallback and the live ticket→socket→listening→stop path |
+| System integrity | `scripts/system_check.py` | **20 passed · 0 failed · 0 warnings · 1 deferred** — 49 modules import, all reachable; UC-02/UC-03/UC-04 now *driven*, not asserted |
+| Transcript persistence | US-006 | **48-turn transcript, contiguous seq 1…48, read through a restarted instance** (`GET /api/admin/conversation`) |
+| Cross-channel identity | US-004 | chat price question → lead captured with the buyer's number → a voice turn from that number answered *"The minimum order quantity for Ultrasound Gel is 10 Pieces"*, product resolved from the web-chat context |
+| Evaluation set | `scripts/release_gate.py --no-browser` | **70 / 70 cases passed** — from the **frozen** set (`eb2ffc27…`) |
+| Citation integrity (US-012) | `scripts/release_gate.py` section 1 | **55 grounded answers, 0 uncited, 0 incomplete** — the check that found the listing branch uncited |
+| Index promotion (US-010) | `scripts/rebuild_index.py` | two rebuilds in **4.3 s each** (`__v1` → `__v2`), 70/70 before promotion; a fresh instance logged `serving promoted collection anita_ams__v2`; **20/20 queries served while `__v4` was promoted** (TAC-4) |
+| Boot preflight | `anita.boot.preflight()` | **OK — zero degradations** |
 | Voice answer path | see §3a | grounded answer, price **with** caveat, greeting, help, decline — all correct |
-| Release gate | `scripts/release_gate.py` | **FAIL — false alarm.** See below |
+| Voice wiring harness | `scripts/voice_e2e.py` | all control stages PASS; model stages need `--models` |
+| Simulated call | see §3a | full media-stream round trip over the public tunnel |
+| Live prose leg | US-014 | real Ollama + real corpus: accepted, grounded, 7.8 s |
+| Barge-in | US-017 | remaining clauses stopped, `clear` sent once, transcript marked |
+| WhatsApp ingress | US-002 | signed message → answered → `outbound_send` row; 10 redeliveries → 1 reply (unit); driven in `system_check` |
+| Browser voice session | US-003 | live: `browser_mic` session row opened, closed `client_stop`, slot released |
+| Release gate | `scripts/release_gate.py` | with an instance: runs; without one: **`[NOT RUN] … not a product failure`** — see below |
 
-The extraction in §3a was verified against all four of the first gates — the unit suite, the frozen
-evaluation set, the browser suite and the system check — because it moves live code the evaluation
-set depends on. All four stayed green.
+**A Playwright defect worth recording (2026-10-04, US-008).** The voice e2e first failed with
+`NotSupportedError: Not supported` from `getUserMedia` under a granted permission and a fake
+device. The cause is not the product: Playwright's default headless **shell**
+(`chromium-headless-shell`) ships without a media stack. The full browser (`channel: "chromium"`)
+works with the same flags. The voice spec pins that channel, scoped to the file so the Streamlit
+scenario suite keeps its default.
+
+**Two more runs that were not evidence (2026-10-04, US-006).** One browser run failed two
+scenarios ("a greeting is greeted", "a price question is not answered with a FAQ") and the
+instance log ended in `Fatal Python error: _PySemaphore_Wakeup: parking_lot: ReleaseSemaphore
+failed` — alarming in a log, and neither was the product's fault: the release gate was running
+its 70-case evaluation on the same CPU at the same time, and the fatal error is a CPython 3.14
+runtime fault in **Streamlit's own `watchdog` thread** (the trunk of that trace is
+`watchdog/observers/winapi.py`; every one of our threads is parked in `threading.wait`). On a
+quiet machine the same suite is **50/50**, and the two assertions hold in-process
+(`Hello — how can I help?`, `₹60/Piece … quotation`). The lesson is the one §7 already learned
+once: before believing a red browser run, check what else is on the machine.
+
+**A verification defect found and fixed on 2026-10-04 — the harness, not the product.** Two
+browser runs failed with wrong answers ("a greeting is greeted" answered from the catalogue; a
+spec question answered with an empty bubble) and looked exactly like product regressions. They
+were three defects in `tests/e2e/run.sh` stacked on each other:
+
+1. **It killed only the parent PID.** Streamlit is parent + child; the child kept port 8085, so
+   the *next* run silently drove the previous instance — whose log line `Port 8085 is not
+   available` went unnoticed. Cleanup now kills the tree, and a **port preflight refuses to test
+   an instance the script did not start** (exit 2).
+2. **The instance inherited the pipeline's stdout**, so anything piping `run.sh` (CI logs, this
+   session) waited for the instance to die — which is why finished runs looked "still running".
+   The redirection now applies to the subshell.
+3. **Editing `app/` files while a run is live** makes Streamlit's watcher reload modules, which
+   duplicates the `Intent` enum inside the cached assembly and breaks `intent is Intent.X` — one
+   edited run failed, and the next inherited the same damaged server through (1).
+
+With the tree frozen and a fresh instance the suite is **50/50 green**. The lesson is recorded
+because it cost most of an afternoon: *a browser failure is only evidence about the product when
+the instance under it is the one you just built.* (A footnote from 2026-10-04: `taskkill /T` still
+left a survivor twice that day — Streamlit re-execs itself, and the new process is no longer in
+the killed tree. The guard turns that into a refusal rather than a false green, which is the
+property that matters; the leak itself is still there.)
 
 ### The release gate failure is an artifact, not a regression
 
@@ -500,38 +624,271 @@ With an instance running, the same suite is **50/50 green**. The gate still has 
 fixing: it cannot distinguish *"the app isn't running"* from *"the product is broken"*, and reports
 the former as the latter — precisely the confusion its own docstring says it exists to prevent.
 
+### The gate's "degraded" lines are themselves an artifact (§8.5)
+
+The same run printed:
+
+```
+degraded: TWILIO_AUTH_TOKEN unset — inbound webhooks cannot be signature-verified
+degraded: TUNNEL_HOST unset — Twilio has no address to call back…
+```
+
+**Both are false.** The preflight on the same machine reports zero degradations and both values are
+set in `.env`. The gate builds its assembly with `assemble(require_preflight=False)`, and
+`assembly.py:196` is `settings = load_settings(env or {})` — passing `{}` explicitly *suppresses*
+`.env` loading. Every caller that skips preflight (the gate, `system_check`, the Streamlit app, the
+dev scripts) therefore runs against an **empty environment**. Tests rely on that isolation, so the
+fix belongs in the callers, not the library: release tooling should build from the real environment
+(`env=load_settings().env`) instead of relying on the skip-preflight default.
+
 ---
 
-## 8. Known documentation defects
+## 8. Defect register — found by the 2026-10-04 call-site audit
+
+Ordered by severity, not by module. Everything here was reproduced or verified in code; the
+`§`-references in §3 point back to these.
+
+### Code defects
+
+| # | Defect | Where | Impact |
+|---|---|---|---|
+| 8.1 | ✅ **Resolved 2026-10-04 by US-022.** Only one handoff could ever be created per database: `handoff_id=""` was inserted verbatim, so the first row took the empty PRIMARY KEY and every later one failed the UNIQUE constraint, swallowed into `dispatched=False`. The handoff's `lead_id` was also the conversation id | `escalation.py`, `crm.py` | The store assigns the id, `conversation_id` is its own column (guarded migration), and the real `lead_id` is passed — empty when anonymous, never a conversation pretending to be a lead |
+| 8.2 | ✅ **Resolved 2026-10-04 by US-022.** Rep notification did not exist: no SMTP code in `app/`, `state='notified'`/`notified_at` never set, and no admin route exposed handoffs | `crm.py`, `notify.py`, `surfaces.py` | `anita/notify.py` emails the rep over SMTP; a delivered notification moves the handoff to `notified` (best-effort — a broken notifier leaves it `open` and never fails the turn); `GET /api/admin/handoffs` and a console panel show the queue |
+| 8.3 | ✅ **Resolved 2026-10-04 by US-017.** Barge-in did not stop clause synthesis: interrupting during clause 1 still synthesised and sent every clause, because the cancel flag was read only before the first clause and after the last | `voice.py`, `voice_rag.py` | The clause loop checks the signal **per clause** (raising `GenerationCancelled`, so no tail flush), `_synthesise_streamed` and the TTS producer stop mid-clause, and a partial is never cached |
+| 8.4 | ✅ **Resolved 2026-10-04 by US-017.** `clear_playout()` had no caller, so Twilio's buffered audio was never cleared on a barge-in | `media_stream.py` | The relay now sends `clear` on the transition into an interruption — once per barge-in (echo/muted frames and the caller's continuing speech do not re-signal) — and marks the transcript truncated |
+| 8.5 | ✅ **Resolved 2026-10-04.** `assemble(require_preflight=False)` dropped `.env` — `load_settings(env or {})` converted `None` to `{}`, which suppresses `.env` loading — so the gate, `system_check`, Streamlit and the dev scripts scored a default assembly and the gate printed two spurious "degraded" lines | `assembly.py` | Fixed by adding `assembly.deployed_environment()` (`.env` overlaid by the real environment, exactly what the boot uses) and having the seven tooling callers pass `env=deployed_environment()`. The test default stays an **empty** environment on purpose — a developer's `.env` must never change a test's result — and `test_the_tooling_passes_the_deployed_environment` guards the wiring |
+| 8.6 | **The media-stream WS performs no admission.** Admission happens only in `POST /twilio/voice`; the WS handler takes no slot | `server.py:169-196`, `media_stream.py:301` | A direct public `wss://…/twilio/media-stream` connection drives STT/TTS without a slot, bypassing the ceiling |
+| 8.7 | **US-025's trace never emits.** `.emit(` has no call site; voice calls `new_trace(call_id, turn)` against a `**kwargs`-only signature, and the `TypeError` is swallowed → `self._trace = None` on every turn; `TurnTrace` lacks `mark()`/`note()` | `voice.py:1137`, `voice_trace.py:14` | No per-turn trace is ever written in production, though the module and its tests pass |
+| 8.8 | **The eval set is not frozen.** `cases_from_corpus()` regenerates the 70 cases from the catalogue at boot; `load_eval_set()` has zero callers and no set file exists | `observability.py:367-431` | A corpus change silently changes the test set — the opposite of "frozen" |
+| 8.9 | **`QualityGate` can report `passed=True` after failures.** `passed` is overwritten for non-critical failures below the regression floors | `observability.py:362` | Masked today (all generated cases are critical); a latent false-green |
+| 8.10 | **`note_asset_played(...)` arity mismatch.** The call passes an argument the method does not accept; masked because the asset path always returns `None`, so the fixed-response branch is silently counted as *failed*, not *degraded* | `voice.py:1959` vs `speech.py:270` | Latent; the refusal-audio path is silent |
+| 8.11 | **Live university-domain pollution in the voice engine** — the worst item was spoken: `CLOSING_REPLY` was *"Thank you for calling **Meridian University Admissions**. Have a great day!"*, fired on every sign-off. Also: `_CORRECTIONS` rewrote transcripts with the source's vocabulary, `_CLARIFICATION_RE` matched `program\|course\|intake\|semester`, `_META_MARKERS` scrubbed for "university profile", `_build_llm_prompt` assembled an "admissions advisor" prompt, and the logger was named `voice_handler` | `voice.py` | ✅ **Resolved 2026-10-04 by CL-1…CL-5 (§10).** Note the isolation guards that *list* sibling values (`config.py:127`, `index.py:76`, `config/anita.yaml`) are deliberate rejection lists and must stay |
+| 8.12 | **Dead/duplicate machinery.** `speech.EndOfSpeechTracker` is a parallel unused implementation; `FRAME_BYTES` is defined and never used; `OFFLINE_TEXT` is dead code; `IndexLifecycle` has no production caller | `speech.py:304`, `media_stream.py:44`, `answer_engine.py:76`, `index.py:163` | Confusing surface area; the origin of several "looks wired, isn't" claims |
+
+### Documentation defects
 
 | # | Defect | Where |
 |---|---|---|
-| 1 | The migration table lists MOD-01/02, MOD-05, MOD-06/07 and MOD-08/10 as `planned` when all are built, committed and tested | `plan-state.md` §Migration status |
-| 2 | "Next action" still says **169 chunks**; reality is **141** (CV-04 resolved the plan as wrong, 169 was never propagated to this line) | `plan-state.md` §Next action |
-| 3 | The gate cannot tell "no instance" from "product broken" | `scripts/release_gate.py` |
+| 8.13 | The migration table lists MOD-01/02, MOD-05, MOD-06/07 and MOD-08/10 as `planned` when all are built, committed and tested; CR-01 is listed "PLANNED — ready to build" when it is 10/10 complete | `plan-state.md` §Migration status, §Change requests |
+| 8.14 | "Next action" still says **169 chunks**; reality is **141** (CV-04 resolved the plan as wrong, 169 was never propagated) | `plan-state.md` §Next action |
+| 8.15 | "What is still missing" says TAC-6 and AC-7 are not implemented — both were implemented in `4fe32b0` | `platform/docs/twilio-voice-setup.md` |
+| 8.16 | The store-integration matrix marks all four stores `NOT STARTED`, contradicting US-103 (Chroma persisted) and US-115 (SentimentStore Protocol) | `change-requests/STATUS.md` |
+| 8.17 | README status table claims MOD-01/02 "next" and "110 tests passing" | `platform/README.md` |
+| 8.18 | ✅ **Resolved 2026-10-04 by CL-6/CL-9 (§10).** `shared/sentiment/core.py` named its logger `"anita.sentiment"` — a product-name leak in a package that must be product-agnostic; now `shared.sentiment`, and the fallback prompt is the generic constant | `shared/sentiment/core.py` |
+| 8.19 | ✅ **Resolved 2026-10-04.** The gate could not tell "no instance" from "product broken": with nothing listening it ran Playwright blind, the serial spec skipped the other 49, and it reported "1 scenario failed". Now it probes the instance's health endpoint first and returns `[NOT RUN] 0 scenarios — no instance on <url> … this is an environment problem, not a product failure`; the verdict still refuses promotion (an unrun suite is not evidence) but `combine_validation` says "browser suite did not run" instead of `failed: []`. **Not covered:** a *stale* instance is still an instance — verified live, a gate run found one failing scenario against a Streamlit process started at 10:41, predating the day's commits | `scripts/release_gate.py` |
+| 8.20 | ✅ **Resolved 2026-10-04 by US-002/US-003/US-004.** The UC-02/03/04/14 deferral reasons had become factually wrong — "no webhook route is served", "no audio path", "an extension point, verified by design review" were all false once the routes were built. The four entries are removed (only UC-09 remains deferred, which is still true) and each use case is now *driven* by `system_check` instead of asserted | `config/anita.yaml` → `release.deferred_use_cases`; `scripts/system_check.py` |
+| 8.21 | ✅ **Resolved 2026-10-04 by US-004.** **US-002's AC-2 was never implemented**: a commercial follow-up that names no product ("and the price?", "what about the MOQ?") declined, because product resolution read only the current message — so the second question of a conversation was refused. Found while wiring cross-channel context, which is exactly what makes it visible. `_follow_up_product` now resolves from the conversation's turns (including seeded cross-channel context) **only** when the message names nothing beyond fact words and filler (`_names_no_product`); a message naming an unrecognised product still declines, because answering about whatever was discussed earlier would quote a real price for the wrong product. Verified live: web-chat price question → voice "what is the minimum order quantity?" → *"The minimum order quantity for Ultrasound Gel is 10 Pieces."* | `answer_engine.py` `_commercial` |
+| 8.22 | ✅ **Found and resolved 2026-10-04 by US-012's citation check.** Two real defects, neither visible from the text of an answer: the **listing branch** ("what do you sell") stated a catalogue fact with no citation, and the incomplete-citation rule was flagging *record* citations ("company:branches") for having no URL — when a record id is precisely how a statutory fact resolves (`TAC-6`). Both were found by running the frozen set a second time counting provenance; neither would have been caught by the gate, which sees text. | `answer_engine.py` (`listing`, `ChatReply.cite`), `scripts/release_gate.py` | Now: 55 grounded answers, 0 uncited, 0 incomplete — printed on every gate run, including at zero, because a check that only speaks when it fails cannot be told from one that never ran |
 
 ---
 
-## 9. What is actually next
+## 9. Pending work — the completion sequence
 
-In priority order:
+The full plan — per-story work, exit criteria, sizes, risks — is `completion-plan-us-001-030.md`
+(user-approved 2026-10-04). This is the same sequence in one screen.
 
-1. **Finish US-001** (§3a) — the remaining six items: C8, the three routes, the TwiML builders, the
-   media-frame relay, the schema, and the tunnel. The answer path is done; this is the transport.
-2. **Fix the release gate** (§8.3) — small, contained, and it currently produces a false `FAIL` on a
-   suite that is genuinely green. A port preflight that reports *"no instance on :8085 — start
-   `run.sh` first"* removes the ambiguity.
-3. **Answer CR-02 Q9–Q12** (§5) to unblock the production-infrastructure change request.
-4. **Disable Smart App Control** (B3, §3a) — needs the Windows Security UI and a reboot, then a
-   re-probe that `import av` succeeds.
-5. **DG-06 operational config** — `TWILIO_AUTH_TOKEN` *is* set in `.env`; the remaining work is
-   confirming signature verification live once the webhook route exists (item 1).
-6. **DG-08 legal review** — needs an owner; blocks public launch and UC-09.
+| Batch | Stories | Done when |
+|---|---|---|
+| **0. Foundations** ✅ | **US-025** trace · **US-027** frozen eval set · release-gate fixes (§8.5, §8.19) — *all done 2026-10-04* | Traces emit ✅ · the gate runs the frozen set with a pinned hash ✅ · an absent instance reads as `[NOT RUN] … not a product failure` ✅ · tooling scores the deployed environment ✅ |
+| **1. Live fixes** ✅ | **US-017** barge-in · **US-022** handoff + notification (§8.1/8.2) — *both done 2026-10-04* | Interrupting stops the remaining clauses, sends `clear` once and marks the transcript ✅; a second escalation opens a second handoff, a notification is attempted and recorded, and the open queue is on the console ✅ |
+| **2. Voice core** ✅ | **US-018** admission · **US-014 + US-015** LLM prose + breaker — *all done 2026-10-04* | The ladder has a runtime trigger and a defensible CPU-host policy ✅; open questions use grounded prose, commercial intents never reach the model, a dead model degrades prose only, and the breaker's state is on every trace ✅ |
+| **3. Carrier proof** | **US-001** (§8.6 also) | `T-01…T-17` pass; a direct WS connect without an admitted call is refused; a real CallSid lands in `inbound_event` |
+| **4. Channels** ✅ | **US-002** WhatsApp · **US-003 + US-008** browser mic — *all done 2026-10-04* | UC-02 and UC-04 are driven by `system_check` and their deferrals are removed ✅ · ten redeliveries produce one reply ✅ · the outbox retries on schedule and dead-letters permanently ✅ · a forged Twilio signature and a bad HMAC are 403/401 with no side effects ✅ · the browser client speaks the frozen frame contract and every failure lands in DEGRADED with text one tap away ✅ · live: 4/4 voice e2e (desktop + mobile) on a fresh instance, session rows close with a reason ✅ |
+| **5. State** ✅ | **US-006** transcripts · **US-004** identity (SQLite behind a Protocol — CR-02 ordering constraint) — *both done 2026-10-04* | Transcripts survive restart with contiguous `seq` and no interleaving ✅ · the review model pages, labels expiry and renders handoffs ✅ · a phone typed on web chat links to the lead a call from that number resolves through, and the product carries ✅ · ten duplicate starts → one conversation ✅ · a stale thread yields a child, never a silent reopen ✅ |
+| **6. Retrieval** ✅ | **US-010** index lifecycle · **US-012** provenance — *both done 2026-10-04* | A failing validation refuses promotion ✅ · promotion is a pointer swap that survives restart, and boot refuses an empty index ✅ · replies carry chunk-level citations and the console review renders them ✅ · "not published" is answered from the probe with 0 LLM calls ✅ (`corpus.caveat_violations()` at boot remains the one open nicety, tracked in US-013) |
 
-Items 1–3 are engineering and can start immediately. Items 4–6 need either a local machine change or
-people outside the build.
+**Hard dependencies:** US-027 → US-010 and every live-wiring story (the eval set is the release
+evidence); US-025 → US-001 T-17 and US-017 (budgets read from traces); US-017 + US-018 → US-001;
+US-006 → US-004; US-014 → US-015.
 
-**Committed 2026-10-04:** CR-01 (all ten stories, `shared/rag`, `shared/sentiment`, both adapters,
-three test files, and the CR-01/CR-02 planning documents) as `5b46528` on
-`chore/secret-hygiene-and-config-audit`. That branch name still describes unrelated work; if this
-becomes a PR it should be renamed. The Phase C work above is **not yet committed**.
+**Each story closes with:** tests green · `system_check` with no new deferrals · release gate against
+a running instance · the evidence line recorded here · the UC deferral removed **last**.
+
+### Still blocked, still deferred
+
+| Item | Blocked on |
+|---|---|
+| US-021 outbound worker | DG-08 legal review — the queue is built and waits |
+| CR-02 Postgres + Docker | Q9–Q12 (§5) |
+| U-1 / U-2 / U-3 | Open product questions (§6) |
+
+UC-09 and UC-14 remain declared deferrals; UC-02, UC-03 and UC-04 are removed as batches 3–4 land.
+
+### Housekeeping (parallel, any time)
+
+- **Fix the release-gate blind spot** (§8.19) and the empty-environment build in the gate/Streamlit/dev
+  scripts (§8.5).
+- **Rewrite the stale docs**: `plan-state.md` (§8.13, §8.14), the Twilio runbook's "still missing"
+  section (§8.15), `change-requests/STATUS.md` store matrix (§8.16), `platform/README.md` (§8.17),
+  the sentiment logger name (§8.18), and the UC-03/UC-04 deferral reasons (§8.20).
+- **§10 — the university-domain cleanup tasks** (research-derived, each with file:line and an
+  acceptance check).
+
+**Commit state:** every code change described in §3a is committed (`8402833`, `d053304`, `f380d97`,
+`382622e`, `a04771f`, `dfcb6c4`, `4fe32b0`). The only dirty files are runtime artifacts
+(`logs/anita_crm.sqlite`, `tests/e2e/playwright-report/index.html`, and an untracked
+`data/chroma_us103_probe/`). The branch is still named
+`chore/secret-hygiene-and-config-audit`; if this becomes a PR it should be renamed.
+
+---
+
+## 10. University-domain cleanup — task list
+
+**Status 2026-10-04: CL-1 … CL-11 are all done.** The engine speaks, corrects, prompts, logs and
+scrubs in ANITA's vocabulary; `grep -n "app\." app/anita/voice.py` returns nothing; and two guards
+now keep it that way — a tree-wide vocabulary net (CL-10) and a vendored faithful-copy manifest
+(CL-11) that cannot silently skip.
+
+**Research basis:** a full-tree scan (2026-10-04) found **110 in-scope occurrences across ~24
+files**, in three kinds: deliberate isolation guards, provenance prose, and live leftovers. The
+corpus is clean (0 blocked markers in 141 chunks); the isolation guards are correct and complete.
+
+**Bottom line: exactly one production file carries the source product's domain on a live path —
+`platform/app/anita/voice.py`.** Everything else is either a rejection guard (keep), provenance
+(the migration audit trail — keep), or a naming leak (rename).
+
+**Constraint that shapes every task below.** `tests/test_mod05_voice_migration.py::test_the_engine_is_a_faithful_copy`
+diffs the engine's `def`/`class` lines against `D:/project/universityDemo/app/voice_handler.py` and
+requires `added == DELIBERATE_NEW` exactly. **Function bodies and class attributes may be edited
+freely; adding or removing a function requires updating that list in the same change.** Removing
+definitions is therefore avoided below — repurpose in place wherever possible.
+
+### 10.1 Live — a caller hears or is affected by this today
+
+* [x] **CL-1 (highest) The spoken closing line.** ✅ **Done 2026-10-04.**
+  `voice.py:615` now reads `CLOSING_REPLY = "Thank you for calling ANITA Medical Systems. Have a
+  great day!"`, spoken deterministically on any sign-off (`voice.py:602-618`, `1302`).
+  **Evidence:** `pytest tests/test_mod05_voice_migration.py -q` → **41 passed**;
+  `test_a_sign_off_speaks_the_anita_closing_line` drives `process_utterance` with stubbed STT/TTS and
+  asserts `end_call is True`, the ANITA line in the dialogue, and no sibling term.
+  *Residual:* a media-stream call re-proves it in Batch 3 — the simulated-call client is not yet a
+  repo script, so the engine path is the repeatable evidence today.
+* [x] **CL-2 STT corrections.** ✅ **Done 2026-10-04.**
+  `voice.py:1433` `_CORRECTIONS` now holds twelve ANITA catalogue corrections (`x ray`→`X-Ray`,
+  `ultra sound`→`Ultrasound`, `fuji film`→`FUJIFILM`, `f c r`→`FCR`, `capsule a`→`Capsula`,
+  `pro fect`→`Profect`, `micro bar`→`Microbar`, `intensive flying`→`Intensifying`,
+  `cath-lab`→`Cath Lab`, `annita`→`ANITA`). Matching is now **word-boundary + escaped**
+  (`voice.py:1448`) — the old substring substitution could fire inside a longer word.
+  The anti-rot invariant is asserted, not promised:
+  `test_every_correction_target_is_catalogue_vocabulary` checks every target against
+  `data/out/ams.sqlite` names/brands + the company identity, and
+  `test_no_correction_carries_sibling_vocabulary` blocks the old table from returning.
+  **Evidence:** `pytest tests -q` → **856 passed, 1 skipped** (was 850); the mis-hearing test turns
+  *"how much is the ultra sound gel and the ex ray cassette"* into *"…Ultrasound…X-Ray…"*.
+  *Residual:* the STT leg itself (Whisper) is re-driven by the Batch 3 carrier proof.
+* [x] **CL-3 Clarification vocabulary.** ✅ **Done 2026-10-04.**
+  `voice.py:372` `_CLARIFICATION_RE` now matches `product|model|item|variant|version|one|size|pack`
+  and `quantity` in place of `program|course|intake|semester|term` / `fall,? ?spring`; the
+  domain-neutral lead-ins (`could you specify`, `did you mean`, `just to confirm`,
+  `are you looking/asking/…`) are deliberately kept — they are the actual loop-breaker signal.
+  **Evidence:** `test_an_anita_clarification_reads_as_one` (six ANITA questions match) and
+  `test_admissions_phrasing_no_longer_reads_as_a_clarification` (five admissions questions do not) —
+  *"Which intake are you applying for?"* → `False`, *"Which specific product are you asking
+  about?"* → `True`. `pytest tests/test_mod05_voice_migration.py -q` → **48 passed**.
+* [x] **CL-4 Meta-leak scrubber.** ✅ **Done 2026-10-04.**
+  `voice.py:560` `_META_MARKERS` now carries `"catalogue profile"` in place of `"university
+  profile"`; the `_PREFIX_STRIP` docstring (`voice.py:571-574`) and the sentence-splitter example
+  (`voice.py:644`, now `₹2,500. Shipping extra`) use catalogue examples. The generic leak markers
+  (`based on`, `let's assume`, `the caller`, …) are unchanged.
+  **Evidence:** `test_the_scrubber_strips_the_meta_prefix_and_keeps_the_answer` — *"Here's the
+  relevant information from the catalogue profile: Ultrasound Gel is listed at ₹60/Piece."* →
+  *"Ultrasound Gel is listed at ₹60/Piece"*; a pure-meta sentence returns `None`; clean text passes
+  through byte-identical; the scrubber carries no sibling term.
+  *Residual:* "no sibling string in the module" is not yet true — the prompt builder (CL-5) still
+  holds the admissions strings, and `voice.py` line numbers after this task shift again when it lands.
+
+### 10.2 Latent — built every turn, discarded today, live the moment US-014 lands
+
+* [x] **CL-5 The prompt builder.** ✅ **Done 2026-10-04.**
+  `_build_llm_prompt` (`voice.py:1658`) now builds the catalogue assistant: *"Answer naturally as a
+  catalogue assistant for medical equipment"* (`voice.py:1674`), *"concrete information from the
+  catalogue"* (`voice.py:1679`), and in the loop-breaker branch *"concrete product information from
+  the catalogue — model, specifications, price"* (`voice.py:1706`). The docstring records why it is
+  inert today and that US-014 makes it live.
+  **Evidence:** `test_the_prompt_names_the_catalogue` and
+  `test_the_loop_breaker_prompt_names_the_catalogue` (the two-clarifications-in-a-row branch) — both
+  assert catalogue vocabulary, the caller's words, and no sibling term. Faithful-copy guard green.
+
+### 10.3 Naming and provenance
+
+* [x] **CL-6 Logger names.** ✅ **Done 2026-10-04.**
+  `voice.py:46` → `anita.voice`; `voice.py:51` → `anita.voice.events`;
+  `shared/sentiment/core.py:39` → `shared.sentiment`. No log-scraping reference to the old names
+  existed in `docs/`, `scripts/` or `*.ps1`, so nothing else needed updating.
+  **Evidence:** `test_the_loggers_are_named_under_anita`,
+  `test_no_logger_is_named_after_the_source_module` (source scan), and
+  `test_the_package_logs_under_its_own_name` for the shared package.
+* [x] **CL-7 Stale source references.** ✅ **Done 2026-10-04.**
+  The module docstring now names what the code actually uses — faster-whisper, `anita.voice_pipeline`
+  / `anita.voice_rag`, `kokoro_onnx` — and its usage example shows the real entry points
+  (`feed_audio` → `process_utterance`) instead of the `handle_media` that never existed. The STT,
+  cancel-chain and trace comments name anita modules.
+  **Evidence:** `grep -n "app\." app/anita/voice.py` → **no matches at all**, not merely
+  provenance-only. Deliberate provenance notes elsewhere (`voice_settings.py:3`, `anita/__init__.py`,
+  `media_stream.py:4`, `audio_format.py:19`, `speech.py:4`) are kept.
+* [x] **CL-8 Dead copied machinery.** ✅ **Done 2026-10-04.**
+  `generate_ulaw_greeting` removed — it pre-synthesised the source's WebSocket greeting, ANITA greets
+  through TwiML `<Say>`, and nothing in this repo called it. A NOTE at `voice.py:341` records the
+  removal, and the faithful-copy test lists it in `DELIBERATE_GONE` in the same change.
+  **Evidence:** `test_the_engine_is_a_faithful_copy` passes with the two-entry divergence list.
+* [x] **CL-9 Product-agnostic package hygiene.** ✅ **Done 2026-10-04.**
+  The discovery was worse than this task recorded: `shared/sentiment/core.py` held a **second**,
+  industry-flavoured fallback (`EXTRACTION_PROMPT = _GENERIC_FALLBACK`, with the duplicated
+  "supplier / supplier") that `build_extraction_prompt()` actually served, while the guarded
+  constant `GENERIC_EXTRACTION_PROMPT` sat unused in `config.py`. The duplicate is deleted and the
+  fallback is now the generic constant — one prompt, one source (`core.py:107-116`).
+  **Evidence:** `test_the_fallback_prompt_is_the_generic_one` (asserts the *served* string, not the
+  constant), `test_the_fallback_substitutes_the_message`, `test_the_package_logs_under_its_own_name`.
+  **Defect this surfaced:** `tests/test_mod07_sentiment.py::test_prompt_carries_the_product_taxonomy`
+  had been passing against that fallback — it was pinning ANITA's product taxonomy to a string ANITA
+  does not serve. It now checks `anita_sentiment_config().extraction_prompt`.
+
+### 10.4 Make it impossible to come back
+
+* [x] **CL-10 The regression net.** ✅ **Done 2026-10-04.**
+  `tests/test_vocabulary_isolation.py` scans `platform/app/anita/**`, `shared/**`, `platform/scripts/**`
+  and `streamlit_app.py` and fails on 22 sibling terms (word-boundary matched).
+  **Design:** only *code* is checked — non-docstring string literals plus function/class/variable
+  names. Docstrings and comments are exempt on purpose: that is where the migration's audit trail
+  lives, and prose cannot reach a caller. Three files are exempt — `config.py`, `index.py`,
+  `stores.py` — each with its reason recorded, and `test_every_exemption_is_earned` fails if an
+  exempt file stops containing the vocabulary it is exempted for.
+  **Evidence:** the net caught this change set's own `scripts/voice_manifest.py` (it hardcoded the
+  sibling source path) — fixed by reading the path from the manifest instead of exempting the script.
+  A planted-string probe (`_pollution_probe.py` with the old closing line) makes it fail with all
+  three terms named; removing the probe makes it pass. `test_the_scanner_finds_planted_terms` keeps
+  the scanner itself honest, and `test_the_scan_covers_the_product_tree` fails if a scan root moves.
+* [x] **CL-11 Guard the guard.** ✅ **Done 2026-10-04.**
+  The faithful-copy check now reads vendored evidence — `tests/fixtures/voice_engine_manifest.json`
+  (source SHA-256, line count, and all 54 source definitions), written by
+  `scripts/voice_manifest.py`. It sits under `fixtures/`, not `data/`, because `data/` is
+  gitignored as a runtime artefact and this file is source. **The skip is gone**: a missing or empty manifest *fails*
+  (`test_the_manifest_is_present`), so on a clean checkout or in CI the engine is checked, not
+  silently skipped. When the sibling repository *is* present and has moved on, the test warns that
+  the manifest is stale rather than failing — the sibling is a different product and is free to
+  evolve; the copy is still compared against the pinned manifest.
+  **Evidence:** Probe A — manifest moved aside → 2 tests **fail** (previously `pytest.skip`).
+  Probe B — manifest repointed at a differing file → the freshness `UserWarning` fires.
+  Restored: 57 tests pass in the two affected files.
+
+### 10.5 Not pollution — do not "clean"
+
+| Item | Why it stays |
+|---|---|
+| `config.py:120-135,158-159`, `index.py:76`, `isolation.py`, `stores.py`, `errors.py`, `config/anita.yaml` (`isolation_forbidden`, `corpus_gate.blocked_markers`) | Rejection lists — they exist so a copy-pasted sibling config is refused at boot. Removing them removes the isolation |
+| `tests/*` sibling markers and negative fixtures (`meridian_kb__v1`, `"Meridian University admissions requirements"`) | The guard tests and their fixtures; they assert the refusal works |
+| Provenance prose in `shared/rag`, `shared/sentiment`, `voice_settings.py`, `anita/__init__.py`, `platform/README.md`, `.env.example` | The migration audit trail: where the code came from and what was retargeted |
+| `docs/sdlc/**` references to `universityDemo` / Meridian | Historical planning and reconciliation records |
+| `admission` (singular) throughout `speech.py`, `voice_webhook.py`, docs | **Call admission** — capacity control, unrelated to university admissions |
+
+### 10.6 Order and evidence
+
+**All eleven tasks done 2026-10-04**, in the recorded order CL-1 → … → CL-11. Totals for the change
+set: `pytest tests -q` → **875 passed, 1 skipped**; `scripts/system_check.py` → **16 passed ·
+0 failed · 5 deferred**; per-task evidence in each entry above. CL-5 landed ahead of US-014, the
+deadline it carried. CL-10/CL-11 change no product behaviour — they exist so CL-1…CL-9 cannot
+silently regress.
+
+**The net is live:** any reintroduction of sibling vocabulary in product code fails the suite with
+the file, line and term named; the faithful-copy check **fails rather than skips** when its manifest
+is missing, so a clean checkout leaves the engine guarded.

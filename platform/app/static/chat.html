@@ -66,7 +66,10 @@
   button:disabled { opacity: .5; cursor: default; }
   button.mic { background: var(--buyer); color: var(--ink); border: 1px solid var(--line); width: 46px; padding: 12px 0; }
   button.mic.live { background: #c0392b; color: #fff; border-color: #c0392b; }
+  button.mic.speaking { background: var(--brand); color: var(--brand-ink); border-color: var(--brand); }
   .hint { font-size: 12px; color: var(--muted); text-align: center; padding: 0 16px 8px; }
+  #voice-status { min-height: 16px; }
+  #voice-status[data-state="degraded"], #voice-status[data-state="ended"] { color: var(--note); }
   @media (max-width: 480px) {
     .msg { max-width: 92%; }
     header h1 { font-size: 14px; }
@@ -85,6 +88,10 @@
 <main id="log" aria-live="polite"></main>
 
 <div class="hint" id="hint">Prices shown are list prices; a formal quotation is required for an order.</div>
+<!-- Every voice state is also a sentence (US-008 TAC-6): a status region, not
+     only a colour on the mic button, and the text chat below stays usable in
+     every one of them. -->
+<div class="hint" id="voice-status" role="status" aria-live="polite" data-state="idle">Voice off — type below, or tap the mic.</div>
 
 <form id="composer" autocomplete="off">
   <button class="mic" id="mic" type="button" title="Speak your question" aria-label="Speak your question">🎤</button>
@@ -197,16 +204,296 @@ form.addEventListener("submit", (e) => {
   ask(message);
 });
 
-// --- browser mic -----------------------------------------------------------
-// The ticket call is the admission decision: if the instance is at capacity or
-// degraded, it comes back refused with something to say rather than a spinner.
-// A MediaRecorder capture is sent to the same text endpoint in this first
-// version; streaming synchronously is what /voice/ws provides.
-let recorder = null, chunks = [], live = false;
+// --- browser voice ---------------------------------------------------------
+// The transport is US-003 (`/voice/browser`); this is the US-008 client.
+//
+// Three properties are non-negotiable here and each one has a failure behind
+// it: every state is also a sentence in #voice-status (a dead spinner tells a
+// buyer nothing); every failure lands in DEGRADED with the text chat and the
+// phone number still reachable (a dead mic button is worse than no mic); and
+// nothing is written to localStorage/sessionStorage (TAC-5 — the token lives
+// in a closure, and a closed tab leaves nothing).
 
-mic.addEventListener("click", async () => {
-  if (live) { recorder && recorder.stop(); return; }
+const VOICE = Object.freeze({
+  IDLE: "idle", MIC: "mic_requested", CONNECTING: "connecting",
+  LISTENING: "listening", THINKING: "thinking", SPEAKING: "speaking",
+  ENDED: "ended", DEGRADED: "degraded",
+});
 
+const voiceStatus = document.getElementById("voice-status");
+let voiceState = VOICE.IDLE;
+let socket = null, audioCtx = null, micStream = null, workletNode = null;
+let recorder = null, recorderChunks = [];
+let sessionToken = null, tokenMintedAt = 0, callbackNumber = "";
+let stoppedByUser = false, reconnectAttempts = 0;
+let playSources = [], playCursor = 0;
+
+// µ-law → PCM. The server speaks the engine's wire format (8 kHz µ-law, the
+// same frames Twilio gets), and the decode table is the read side of
+// G.711 — fifteen lines instead of a dependency.
+const ULAW_TABLE = (() => {
+  const table = new Int16Array(256);
+  for (let i = 0; i < 256; i++) {
+    const u = ~i & 0xff;
+    const sign = (u & 0x80) ? -1 : 1;
+    const exponent = (u >> 4) & 0x07;
+    const mantissa = u & 0x0f;
+    const magnitude = (((mantissa << 3) + 0x84) << exponent) - 0x84;
+    table[i] = Math.max(-32768, Math.min(32767, sign * magnitude));
+  }
+  return table;
+})();
+
+function bytesToB64(bytes) {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 8192) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+  }
+  return btoa(binary);
+}
+
+function b64ToBytes(text) {
+  const binary = atob(text);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+  return out;
+}
+
+function voiceSentence(state) {
+  const phone = callbackNumber ? " You can call us on " + callbackNumber + "." : "";
+  switch (state) {
+    case VOICE.MIC: return "Asking for your microphone…";
+    case VOICE.CONNECTING: return "Connecting…";
+    case VOICE.LISTENING: return "Listening — ask your question, then pause. Tap the mic to stop.";
+    case VOICE.THINKING: return "Found it — getting the answer…";
+    case VOICE.SPEAKING: return "Speaking — tap the mic to interrupt.";
+    case VOICE.ENDED: return "Voice session ended. Tap the mic to start again, or type below.";
+    default: return "Voice off — type below, or tap the mic.";
+  }
+}
+
+function setVoiceState(next, sentence) {
+  voiceState = next;
+  voiceStatus.dataset.state = next;
+  voiceStatus.textContent = sentence || voiceSentence(next);
+  mic.classList.toggle("live", next === VOICE.LISTENING || next === VOICE.MIC
+    || next === VOICE.CONNECTING || next === VOICE.THINKING);
+  mic.classList.toggle("speaking", next === VOICE.SPEAKING);
+  mic.textContent = (next === VOICE.LISTENING || next === VOICE.MIC) ? "■" : "🎤";
+  mic.setAttribute("aria-label",
+    next === VOICE.SPEAKING ? "Interrupt the answer"
+      : next === VOICE.LISTENING ? "Stop the voice session"
+      : "Speak your question");
+}
+
+// A refusal or an unavailable microphone is a first-class state, never a dead
+// control: text chat is always one tap away and the phone number is shown when
+// the server gave us one (AC-3/AC-4/AC-7, CS-4).
+function degrade(reason, detail) {
+  const phone = callbackNumber ? " Or call us on " + callbackNumber + "." : "";
+  const sentences = {
+    denied: "I can't reach your microphone. Please type your question below." + phone,
+    unsupported: "Voice isn't available in this browser — please type below." + phone,
+    busy: (detail || "All our voice lines are busy right now.") + phone,
+    dropped: "The voice connection dropped. Tap the mic to try again, or type below." + phone,
+    rate: "That was a lot of voice turns at once. Please wait a moment and try again." + phone,
+  };
+  setVoiceState(VOICE.DEGRADED, sentences[reason] || sentences.dropped);
+  bubble(sentences[reason] || sentences.dropped, "note");
+}
+
+function releaseCapture() {
+  if (workletNode) { try { workletNode.port.onmessage = null; workletNode.disconnect(); } catch {} workletNode = null; }
+  if (recorder && recorder.state !== "inactive") { try { recorder.stop(); } catch {} }
+  recorder = null; recorderChunks = [];
+  if (micStream) { micStream.getTracks().forEach((track) => track.stop()); micStream = null; }
+}
+
+function closeAudio() {
+  flushPlayback();
+  if (audioCtx) { try { audioCtx.close(); } catch {} audioCtx = null; }
+}
+
+// -- playback ---------------------------------------------------------------
+function enqueueAudio(ulawB64) {
+  if (!audioCtx) return;
+  const bytes = b64ToBytes(ulawB64);
+  if (!bytes.length) return;
+  const samples = new Float32Array(bytes.length);
+  for (let i = 0; i < bytes.length; i++) samples[i] = ULAW_TABLE[bytes[i]] / 32768;
+
+  // One ordered queue (`TAC-4`): every frame is scheduled after the previous
+  // one, so the answer can never play out of order.
+  const buffer = audioCtx.createBuffer(1, samples.length, 8000);
+  buffer.copyToChannel(samples, 0);
+  const source = audioCtx.createBufferSource();
+  source.buffer = buffer;
+  source.connect(audioCtx.destination);
+  const startAt = Math.max(audioCtx.currentTime + 0.03, playCursor);
+  source.start(startAt);
+  playCursor = startAt + buffer.duration;
+  playSources.push(source);
+  source.onended = () => {
+    playSources = playSources.filter((item) => item !== source);
+    if (!playSources.length && voiceState === VOICE.SPEAKING) setVoiceState(VOICE.LISTENING);
+  };
+}
+
+function flushPlayback() {
+  playSources.forEach((source) => { try { source.stop(); } catch {} });
+  playSources = [];
+  playCursor = 0;
+}
+
+// -- capture ----------------------------------------------------------------
+function sendPcm(int16) {
+  if (!socket || socket.readyState !== WebSocket.OPEN || !int16.length) return;
+  socket.send(JSON.stringify({
+    type: "audio",
+    pcm16: bytesToB64(new Uint8Array(int16.buffer, int16.byteOffset, int16.byteLength)),
+  }));
+}
+
+function resampleTo16k(samples, sourceRate) {
+  if (sourceRate === 16000) return samples;
+  const ratio = sourceRate / 16000;
+  const outLength = Math.floor(samples.length / ratio);
+  const out = new Int16Array(outLength);
+  for (let i = 0; i < outLength; i++) {
+    const position = i * ratio;
+    const index = Math.floor(position);
+    const fraction = position - index;
+    const a = samples[index] || 0;
+    const b = samples[index + 1] !== undefined ? samples[index + 1] : a;
+    const value = a + (b - a) * fraction;
+    out[i] = Math.max(-32768, Math.min(32767, Math.round(value)));
+  }
+  return out;
+}
+
+async function startCapture() {
+  // AudioWorklet first (`TAC-2`): 20 ms frames as the stream runs, which is
+  // what makes end-of-speech prompt. MediaRecorder is the fallback for
+  // browsers without it — chunkier framing, same contract, whole utterance
+  // sent on stop.
+  if (audioCtx.audioWorklet && audioCtx.audioWorklet.addModule) {
+    try {
+      await audioCtx.audioWorklet.addModule("/static/pcm-worklet.js");
+      const source = audioCtx.createMediaStreamSource(micStream);
+      workletNode = new AudioWorkletNode(audioCtx, "pcm-capture", {
+        processorOptions: { targetRate: 16000 },
+      });
+      workletNode.port.onmessage = (event) => sendPcm(event.data);
+      const sink = audioCtx.createGain();
+      sink.gain.value = 0;              // never route the mic to the speaker
+      source.connect(workletNode);
+      workletNode.connect(sink);
+      sink.connect(audioCtx.destination);
+      return;
+    } catch (err) {
+      workletNode = null;               // fall through to the recorder path
+    }
+  }
+
+  recorderChunks = [];
+  recorder = new MediaRecorder(micStream);
+  recorder.ondataavailable = (event) => { if (event.data.size) recorderChunks.push(event.data); };
+  recorder.onstop = async () => {
+    if (!recorderChunks.length || !socket || socket.readyState !== WebSocket.OPEN) return;
+    try {
+      const blob = new Blob(recorderChunks);
+      const decodeCtx = new AudioContext();
+      const decoded = await decodeCtx.decodeAudioData(await blob.arrayBuffer());
+      const channel = decoded.getChannelData(0);
+      const asInt16 = new Int16Array(channel.length);
+      for (let i = 0; i < channel.length; i++) {
+        asInt16[i] = Math.max(-32768, Math.min(32767, Math.round(channel[i] * 32767)));
+      }
+      decodeCtx.close();
+      sendPcm(resampleTo16k(asInt16, decoded.sampleRate));
+      // The whole utterance arrived at once and there is no trailing silence
+      // to detect: commit is what turns it into a turn.
+      socket.send(JSON.stringify({ type: "commit" }));
+    } catch (err) { /* nothing sensible to say; the next turn still works */ }
+  };
+  recorder.start();
+}
+
+// -- the socket -------------------------------------------------------------
+function handleFrame(frame) {
+  if (frame.type === "ready") {
+    reconnectAttempts = 0;
+    setVoiceState(VOICE.LISTENING);
+  } else if (frame.type === "transcript") {
+    if (frame.text) bubble(frame.text, frame.role === "caller" ? "user" : "agent");
+    if (frame.role === "assistant") setVoiceState(VOICE.SPEAKING);
+  } else if (frame.type === "audio") {
+    if (voiceState !== VOICE.SPEAKING) setVoiceState(VOICE.SPEAKING);
+    enqueueAudio(frame.ulaw_b64);
+  } else if (frame.type === "flush") {
+    flushPlayback();                    // server-side barge-in: drop buffered audio
+  } else if (frame.type === "turn_complete") {
+    if (!playSources.length) setVoiceState(VOICE.LISTENING);
+  } else if (frame.type === "busy") {
+    callbackNumber = frame.callback_number || callbackNumber;
+    releaseCapture(); closeAudio();
+    degrade("busy", frame.message);
+  } else if (frame.type === "error") {
+    if (frame.code === "rate_limited") { releaseCapture(); closeAudio(); degrade("rate"); }
+  }
+}
+
+function connectSocket(token) {
+  return new Promise((resolve, reject) => {
+    const scheme = window.location.protocol === "https:" ? "wss://" : "ws://";
+    socket = new WebSocket(scheme + window.location.host + "/voice/browser");
+    socket.onopen = () => {
+      // The token travels in the first frame, never in the URL: a credential
+      // in a query string ends up in logs and history (TAC-8).
+      socket.send(JSON.stringify({ type: "auth", token }));
+      socket.send(JSON.stringify({ type: "start", conversation_id: sessionId }));
+      resolve();
+    };
+    socket.onmessage = (event) => {
+      let frame = null;
+      try { frame = JSON.parse(event.data); } catch { return; }
+      if (frame && frame.type) handleFrame(frame);
+    };
+    socket.onclose = (event) => {
+      releaseCapture(); closeAudio();
+      if (stoppedByUser || voiceState === VOICE.ENDED || voiceState === VOICE.DEGRADED) return;
+      if (event.code === 4001) { degrade("dropped"); sessionToken = null; return; }
+      if (event.code === 4002) { degrade("busy"); return; }
+      if (event.code === 4008) { degrade("rate"); return; }
+      // Transport lost: reconnect 1 s → 8 s, four attempts, same token, same
+      // conversation (`AC-6`). After that it is an honest DEGRADED.
+      if (reconnectAttempts < 4 && sessionToken
+          && Date.now() - tokenMintedAt < 60000) {
+        const delay = 1000 * Math.pow(2, reconnectAttempts);
+        reconnectAttempts += 1;
+        setVoiceState(VOICE.CONNECTING,
+          "Connection dropped — reconnecting (" + reconnectAttempts + "/4)…");
+        window.setTimeout(() => {
+          connectSocket(sessionToken).catch(() => setVoiceState(VOICE.DEGRADED, null));
+        }, delay);
+      } else {
+        degrade("dropped");
+      }
+    };
+    socket.onerror = () => reject(new Error("voice socket failed"));
+  });
+}
+
+async function startVoice() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.WebSocket) {
+    degrade("unsupported");
+    return;
+  }
+  stoppedByUser = false;
+  setVoiceState(VOICE.MIC);
+
+  // The ticket is the admission forecast (`peek`): it does not reserve the
+  // slot, so a denied microphone permission costs no capacity.
   let ticket;
   try {
     const res = await fetch(API + "/api/voice/ticket", {
@@ -215,40 +502,67 @@ mic.addEventListener("click", async () => {
       body: JSON.stringify({ session_id: sessionId }),
     });
     ticket = await res.json();
-    if (!res.ok || !ticket.admitted) {
-      bubble(ticket.message || "Voice isn't available right now.", "note");
-      return;
-    }
   } catch {
-    bubble("Voice isn't available right now. Please type your question.", "note");
+    degrade("dropped");
+    return;
+  }
+  callbackNumber = ticket.callback_number || callbackNumber;
+  if (!ticket.admitted) {
+    degrade("busy", ticket.message);
+    return;
+  }
+  sessionToken = ticket.ticket;
+  tokenMintedAt = Date.now();
+
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+    });
+  } catch (err) {
+    degrade("denied");
     return;
   }
 
+  setVoiceState(VOICE.CONNECTING);
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    recorder = new MediaRecorder(stream);
-    chunks = [];
-    live = true;
-    mic.classList.add("live");
-    mic.textContent = "■";
-    hint.textContent = "Listening… tap again to stop.";
-
-    recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
-    recorder.onstop = async () => {
-      stream.getTracks().forEach((t) => t.stop());
-      live = false;
-      mic.classList.remove("live");
-      mic.textContent = "🎤";
-      hint.textContent = "Prices shown are list prices; a formal quotation is required for an order.";
-      if (chunks.length) {
-        bubble("(voice question recorded — transcription runs on the server)", "note");
-      }
-    };
-    recorder.start();
-  } catch {
-    bubble("I can't access your microphone. Please type your question instead.", "note");
-    live = false;
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+    if (audioCtx.state === "suspended") await audioCtx.resume();
+    await connectSocket(sessionToken);
+    await startCapture();
+  } catch (err) {
+    releaseCapture(); closeAudio();
+    degrade("dropped");
   }
+}
+
+function interrupt() {
+  flushPlayback();
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify({ type: "stop_speaking" }));
+  }
+  setVoiceState(VOICE.LISTENING);
+}
+
+function stopVoice() {
+  stoppedByUser = true;
+  flushPlayback();
+  if (recorder && recorder.state !== "inactive") { try { recorder.stop(); } catch {} }
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify({ type: "stop" }));
+  }
+  releaseCapture();
+  if (socket) { try { socket.close(1000); } catch {} socket = null; }
+  closeAudio();
+  setVoiceState(VOICE.ENDED);
+}
+
+mic.addEventListener("click", () => {
+  if (voiceState === VOICE.SPEAKING) { interrupt(); return; }
+  if (voiceState === VOICE.LISTENING) { stopVoice(); return; }
+  // A second press while connecting or thinking is ignored (edge case 10).
+  if (voiceState === VOICE.MIC || voiceState === VOICE.CONNECTING
+      || voiceState === VOICE.THINKING) return;
+  startVoice();
 });
 
 // --- health ----------------------------------------------------------------

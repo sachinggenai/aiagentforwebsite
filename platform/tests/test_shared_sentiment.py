@@ -89,6 +89,31 @@ class TestPackageIsProductNeutral:
         for word in ("medical", "hospital", "clinic", "university", "student"):
             assert word not in lowered, f"the generic prompt claims to know {word!r}"
 
+    def test_the_fallback_prompt_is_the_generic_one(self):
+        """The prompt the package actually falls back to — not just the
+        constant the test above guards. Until CL-9 they were two different
+        strings, and the served one named the industry."""
+        from shared.sentiment.core import build_extraction_prompt
+
+        lowered = build_extraction_prompt("hello").casefold()
+        for word in ("medical", "hospital", "clinic", "university", "student",
+                     "imaging", "equipment"):
+            assert word not in lowered, f"the fallback prompt claims to know {word!r}"
+
+    def test_the_fallback_substitutes_the_message(self):
+        from shared.sentiment.core import build_extraction_prompt
+
+        built = build_extraction_prompt("the price seems high")
+        assert "the price seems high" in built
+        assert "{message}" not in built
+
+    def test_the_package_logs_under_its_own_name(self):
+        """CL-9: the logger was `anita.sentiment` — a product name inside a
+        package whose docstring promises it names no product."""
+        import shared.sentiment.core as core
+
+        assert core.logger.name == "shared.sentiment"
+
 
 # ---------------------------------------------------------------------------
 # US-111 — the two capabilities the merge had to preserve

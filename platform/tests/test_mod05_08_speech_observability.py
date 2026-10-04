@@ -519,3 +519,584 @@ class TestCombinedValidation:
         assert result["total"] == 68
         assert result["browser"]["total"] == 25
         assert result["system"]["loaded"] == 35
+
+
+# ---------------------------------------------------------------------------
+# US-025 — per-turn trace emission
+# ---------------------------------------------------------------------------
+class TestUS025TurnTrace:
+    """Every turn emits a trace, and tracing can never fail a turn.
+
+    Before this, `voice_trace.new_trace(**kwargs)` did not accept the engine's
+    positional call, the `TypeError` vanished into a broad `except`, and
+    `self._trace` was `None` on every turn: traced in tests, nowhere else.
+    """
+
+    LOUD = None  # built lazily in _speak
+
+    def _speak(self, session):
+        """Drive the session to end-of-speech, which is where a trace opens."""
+        from anita import voice
+
+        loud = voice.pcm_to_ulaw(b"\x00\x20" * 320)
+        for _ in range(voice.MIN_UTTERANCE_FRAMES):
+            session.feed_audio(loud)
+        for _ in range(30):
+            if session.feed_audio(b"\xff" * 160):
+                return
+        raise AssertionError("end-of-speech never fired")
+
+    # -- the record --------------------------------------------------------
+    def test_a_stage_that_did_not_run_is_absent_never_zero(self):
+        trace = TurnTrace(trace_id="t")
+        trace.mark("turn_received")
+        trace.mark("outcome")
+        durations = trace.as_dict()["durations_ms"]
+        assert "retrieval_done" not in durations
+        assert list(durations) == ["outcome"], "only the interval that happened"
+
+    def test_a_repeated_mark_is_counted_not_overwritten(self):
+        trace = TurnTrace(trace_id="t")
+        trace.mark("classified")
+        trace.mark("classified")
+        assert trace.as_dict()["stages_seen"] == ["classified"]
+        assert trace.dropped_marks == 1
+
+    def test_note_refuses_non_numeric_values(self):
+        """The PII guard: a buyer's name cannot enter through a counter."""
+        import json
+
+        trace = TurnTrace(trace_id="t")
+        trace.note(hits=3, buyer_name="Priya", transcript="my number is 98…")
+        assert trace.as_dict()["counters"] == {"hits": 3}
+        assert "Priya" not in json.dumps(trace.as_dict())
+
+    def test_a_backwards_clock_is_clamped_and_flagged(self):
+        trace = TurnTrace(trace_id="t")
+        trace.mark("a")
+        trace._marks["b"] = trace._marks["a"] - 5.0
+        assert trace.durations_ms() == {"b": 0}
+        assert trace.clock_skew is True
+
+    # -- the writer --------------------------------------------------------
+    def test_a_failing_sink_is_counted_not_raised(self):
+        class Broken:
+            def write(self, trace):
+                raise OSError("disk full")
+
+        writer = TraceWriter(Broken())
+        assert writer.emit(TurnTrace(trace_id="t")) is False
+        assert writer.stats()["dropped"] == 1
+
+    def test_the_log_rotates_and_keeps_the_configured_files(self, tmp_path):
+        sink = JsonlSink(tmp_path / "perf_turns.jsonl", rotate_bytes=200, keep_files=2)
+        writer = TraceWriter(sink)
+        for index in range(10):
+            writer.emit(TurnTrace(trace_id=f"t{index}", channel="web_chat"))
+
+        assert (tmp_path / "perf_turns.jsonl").exists()
+        assert (tmp_path / "perf_turns.jsonl.1").exists()
+        assert not (tmp_path / "perf_turns.jsonl.3").exists(), "keeps only 2"
+        assert writer.stats()["dropped"] == 0, "rotation must not drop turns"
+
+    # -- the adapter -------------------------------------------------------
+    def test_the_engine_opens_a_trace_at_end_of_speech(self):
+        from anita import voice
+
+        session = voice.VoiceCallSession()
+        self._speak(session)
+        assert session._trace is not None, "the engine is tracing nothing again"
+        assert session._trace.channel == "voice"
+        assert session._trace.stages_seen == ["vad_end"]
+
+    def test_a_finished_voice_turn_emits_one_masked_record(self):
+        from anita import voice, voice_trace
+
+        sink = MemorySink()
+        original = voice_trace.writer()
+        voice_trace.install(TraceWriter(sink))
+        try:
+            session = voice.VoiceCallSession()
+            session.call_id = "CA-simcall-0000000000001"
+            self._speak(session)
+            session.finish_trace(outcome="answered")
+        finally:
+            voice_trace.install(original)
+
+        assert len(sink.traces) == 1
+        record = sink.traces[0]
+        assert record.outcome == "answered"
+        assert "vad_end" in record.stages_seen
+        assert record.conversation_id.startswith("…"), "call ids are masked (TAC-8)"
+        assert "0000000000001" not in record.conversation_id
+
+    def test_a_chat_turn_emits_a_trace(self):
+        from types import SimpleNamespace
+
+        from anita.surfaces import ChatSurface
+
+        sink = MemorySink()
+        chat = ChatSurface(orchestrator=None, traces=TraceWriter(sink))
+        conversation = SimpleNamespace(
+            conversation_id="c1",
+            turns=[object(), object()],
+            sentiment=SimpleNamespace(category="Warm"),
+        )
+        reply = SimpleNamespace(
+            intent="price", grounded=True, unavailable=False,
+            declined=False, escalation=False, text="₹60",
+        )
+
+        trace = chat._begin_trace(conversation)
+        chat._emit_trace(trace, conversation, reply)
+
+        record = sink.traces[0]
+        assert record.channel == "web_chat"
+        assert record.turn_no == 2
+        assert record.sentiment_category == "Warm"
+        assert record.grounded is True
+        assert record.outcome == "answered"
+        assert record.stages_seen == [
+            "turn_received", "answer_composed", "sentiment_scored", "outcome",
+        ]
+
+    def test_a_chat_turn_with_no_writer_is_untouched(self):
+        from types import SimpleNamespace
+
+        from anita.surfaces import ChatSurface
+
+        chat = ChatSurface(orchestrator=None)
+        conversation = SimpleNamespace(conversation_id="c1", turns=[])
+        trace = chat._begin_trace(conversation)
+        assert trace is None
+        chat._emit_trace(trace, conversation, SimpleNamespace())  # must not raise
+
+    def test_the_trace_module_imports_stdlib_only(self):
+        """TAC-1: telemetry must be deletable, so it may depend on nothing in
+        this repository and nothing third-party."""
+        import ast
+        import sys as _sys
+
+        source = (PLATFORM / "app" / "anita" / "observability.py").read_text(encoding="utf-8")
+        imported: set[str] = set()
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                imported.add(node.module.split(".")[0])
+
+        non_stdlib = imported - set(_sys.stdlib_module_names) - {"__future__"}
+        assert not non_stdlib, (
+            f"observability pulled in a non-stdlib dependency: {sorted(non_stdlib)}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# US-027 — the frozen evaluation set and the quality gate
+# ---------------------------------------------------------------------------
+class TestUS027FrozenEvalSet:
+    """The set is a versioned repo file with a pinned hash.
+
+    Before this it was regenerated from the catalogue at every boot, so a
+    corpus refresh silently changed the test set and every "70/70 passed"
+    described a different set than the previous run's.
+    """
+
+    ENV = {"ANITA_ADMIN_TOKEN": "test"}
+
+    def _settings(self):
+        from anita.config import load_settings
+
+        return load_settings(env=self.ENV)
+
+    def test_the_frozen_set_is_on_disk_and_matches_the_pin(self):
+        from anita.observability import eval_set_sha256, load_eval_set
+
+        settings = self._settings()
+        path = settings.eval_set_path
+        assert path.exists(), f"the frozen set is missing: {path}"
+        assert load_eval_set(path), "the frozen set is empty"
+        assert eval_set_sha256(path) == settings.release.eval_set_sha256, (
+            "the set changed without the hash being re-pinned"
+        )
+
+    def test_the_gate_loads_the_frozen_set_with_its_hash(self):
+        from anita import assembly
+
+        settings = self._settings()
+        notes: list[str] = []
+        gate = assembly._build_release_gate(settings, notes)
+        assert gate is not None, notes
+        assert gate.set_sha256 == settings.release.eval_set_sha256
+        assert len(gate.cases) == 70
+        assert not notes, "a healthy gate should not degrade anything"
+
+    def test_a_hash_mismatch_disables_the_gate(self):
+        """Fail closed: an edited set cannot be scored by accident."""
+        from dataclasses import replace
+
+        from anita import assembly
+
+        settings = self._settings()
+        broken = replace(
+            settings, release=replace(settings.release, eval_set_sha256="0" * 64)
+        )
+        notes: list[str] = []
+        gate = assembly._build_release_gate(broken, notes)
+        assert gate is None, "a mismatched set must not build a gate"
+        assert any("hash mismatch" in note for note in notes), notes
+
+    def test_a_missing_set_disables_the_gate(self):
+        from dataclasses import replace
+
+        from anita import assembly
+
+        settings = self._settings()
+        broken = replace(
+            settings, release=replace(settings.release, eval_set="eval/does-not-exist.jsonl")
+        )
+        notes: list[str] = []
+        assert assembly._build_release_gate(broken, notes) is None
+        assert any("unavailable" in note for note in notes), notes
+
+    # -- the verdict rules (the false-green fix) ---------------------------
+    def _cases(self, count: int, severity: str = "normal"):
+        from anita.observability import EvalCase
+
+        return [
+            EvalCase(
+                case_id=f"c{index}", question=f"q{index}",
+                must_contain=("ok",), severity=severity,
+            )
+            for index in range(count)
+        ]
+
+    def test_a_non_critical_failure_passes_but_the_report_says_so(self):
+        """The gate used to report `all N cases passed` while holding failures:
+        a false green. The tolerance is real (a 98 % floor is the point), but
+        the reason must name what failed."""
+        from anita.observability import QualityGate
+
+        gate = QualityGate(self._cases(50))
+
+        def answerer(case):
+            return "nope" if case.case_id == "c7" else "ok"
+
+        report = gate.evaluate(answerer)
+        assert report.passed is True, "one non-critical failure is inside the floor"
+        assert report.failed_ids == ["c7"]
+        assert "non-critical" in report.reason and "c7" in report.reason
+        assert "all 50" not in report.reason
+
+    def test_a_critical_failure_blocks_regardless_of_rate(self):
+        from anita.observability import QualityGate
+
+        gate = QualityGate(self._cases(50, severity="critical"))
+
+        def answerer(case):
+            return "nope" if case.case_id == "c7" else "ok"
+
+        report = gate.evaluate(answerer)
+        assert report.passed is False
+        assert "critical" in report.reason
+
+    def test_a_clean_run_says_so(self):
+        from anita.observability import QualityGate
+
+        report = QualityGate(self._cases(5)).evaluate(lambda case: "ok")
+        assert report.passed is True
+        assert report.reason == "all 5 cases passed"
+
+    def test_the_report_carries_the_set_hash(self):
+        from anita.observability import QualityGate
+
+        gate = QualityGate(self._cases(2), set_sha256="abc123")
+        assert gate.evaluate(lambda case: "ok").as_dict()["set_sha256"] == "abc123"
+
+
+class TestUS027RebuildEntryPoint:
+    """The operational entry point that was missing: nothing in the product
+    ever called `index.build_index(..., validate=...)`, so the atomic-promotion
+    design was tested and unreachable."""
+
+    def test_the_rebuild_script_exists_and_imports(self):
+        import importlib.util
+
+        path = PLATFORM / "scripts" / "rebuild_index.py"
+        assert path.exists()
+        spec = importlib.util.spec_from_file_location("rebuild_index", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)  # must not run anything on import
+        assert callable(module.main)
+        assert callable(module._gate_validator)
+
+    def test_the_validator_returns_the_report_dict(self):
+        import importlib.util
+        from types import SimpleNamespace
+
+        path = PLATFORM / "scripts" / "rebuild_index.py"
+        spec = importlib.util.spec_from_file_location("rebuild_index", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        class FakeGate:
+            set_sha256 = "x"
+
+            def evaluate(self, answerer):
+                return SimpleNamespace(as_dict=lambda: {"passed": True, "reason": "ok"})
+
+        validator = module._gate_validator(chat=None, gate=FakeGate())
+        assert validator(object()) == {"passed": True, "reason": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# §8.5 / §8.19 — the gate's environment and its diagnosis
+# ---------------------------------------------------------------------------
+class TestGateEnvironmentAndDiagnosis:
+    """Two artifacts the gate used to produce:
+
+    * §8.5 — it built with an *empty* environment (`assemble(
+      require_preflight=False)` collapsed `None` to `{}`), so it printed
+      "TWILIO_AUTH_TOKEN unset" beside a `.env` that sets it, and scored a
+      default assembly rather than the deployed one.
+    * §8.19 — with nothing listening on the instance port it reported
+      "1 scenario failed", blaming the product for an absent instance.
+    """
+
+    def _gate_script(self):
+        import importlib.util
+
+        path = PLATFORM / "scripts" / "release_gate.py"
+        spec = importlib.util.spec_from_file_location("release_gate", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    # -- §8.19 -------------------------------------------------------------
+    def test_an_unreachable_instance_is_named_as_such(self, monkeypatch):
+        module = self._gate_script()
+        monkeypatch.setattr(module, "instance_is_up", lambda url=None: False)
+        report = module.run_browser_suite()
+        assert report.total == 0
+        assert "no instance" in report.reason
+        assert "not a product failure" in report.reason
+
+    def test_a_closed_port_is_not_reachable(self):
+        module = self._gate_script()
+        assert module.instance_is_up("http://127.0.0.1:9", timeout=0.3) is False
+
+    def test_an_unrun_suite_is_not_reported_as_failed_scenarios(self):
+        from anita.observability import (
+            BrowserReport, GateReport, SystemReport, combine_validation,
+        )
+
+        result = combine_validation(
+            GateReport(passed=True, total=70, reason="all 70 cases passed"),
+            BrowserReport(passed=False, total=0, reason="no instance on http://127.0.0.1:8085"),
+            SystemReport(passed=True, loaded=41, wired=11),
+        )
+        assert result["passed"] is False, "an unrun suite is still not evidence"
+        assert "did not run" in result["reason"]
+        assert "failed: []" not in result["reason"]
+
+    # -- §8.5 --------------------------------------------------------------
+    def test_the_deployed_environment_is_the_boots_environment(self, monkeypatch):
+        from anita.assembly import deployed_environment
+
+        monkeypatch.setenv("TWILIO_AUTH_TOKEN", "probe-token")
+        assert deployed_environment()["TWILIO_AUTH_TOKEN"] == "probe-token"
+
+    def test_the_test_default_stays_an_empty_environment(self):
+        """The isolation is the point: a developer's `.env` must never change
+        a test's result, so the fix moved to the callers that need the real
+        environment rather than changing the default."""
+        from anita.assembly import assemble
+
+        built = assemble(require_preflight=False)
+        assert any("TWILIO_AUTH_TOKEN unset" in note for note in built.notes)
+
+    def test_the_tooling_passes_the_deployed_environment(self):
+        for name in (
+            "release_gate.py", "system_check.py", "rag_audit.py",
+            "trace_question.py", "trace_use_cases.py", "validate_chat.py",
+            "rebuild_index.py",
+        ):
+            source = (PLATFORM / "scripts" / name).read_text(encoding="utf-8")
+            assert "env=deployed_environment()" in source, (
+                f"{name} builds an empty environment again (§8.5)"
+            )
+        streamlit = (PLATFORM / "streamlit_app.py").read_text(encoding="utf-8")
+        assert "env=deployed_environment()" in streamlit, "Streamlit lost its environment"
+
+
+# ---------------------------------------------------------------------------
+# US-018 — the VRAM ladder actually moves
+# ---------------------------------------------------------------------------
+class TestUS018Capacity:
+    """The ladder, the ceiling and the footprint maths all existed — and
+    nothing drove them. `.degrade(` had no caller outside tests, `gpu_free_mib`
+    was never written, and a host without a GPU admitted calls as if it had
+    one beside a boot report claiming voice "will be refused at admission".
+    """
+
+    def _controller(self, **kwargs):
+        from anita.speech import AdmissionController
+
+        return AdmissionController(max_concurrent_calls=2, **kwargs)
+
+    def _policy(self, controller, free):
+        from anita.capacity import CapacityPolicy
+
+        return CapacityPolicy(controller, source=lambda: free)
+
+    def test_the_ladder_is_the_storys_order(self):
+        from anita.speech import LADDER
+
+        assert [level.value for level in LADDER] == [
+            "full", "voice_shed", "stt_off", "tts_off", "chat_degrade",
+            "commercial_only",
+        ]
+
+    def test_pressure_sheds_voice_before_anything_else(self):
+        from anita.speech import DegradationLevel
+
+        controller = self._controller()
+        policy = self._policy(controller, free=100)   # below the sibling floor
+
+        moved = policy.sample()
+
+        assert moved == "degrade:voice_shed"
+        assert controller.level is DegradationLevel.VOICE_SHED
+        assert controller.text_available is True, "text must survive voice being shed"
+
+    def test_a_shed_voice_refuses_the_next_call(self):
+        controller = self._controller()
+        self._policy(controller, free=100).sample()
+
+        decision = controller.admit("call-1")
+
+        assert decision.admitted is False
+        assert "shed" in decision.reason
+        assert controller.active_calls() == 0, "no slot is taken by a refusal"
+
+    def test_pressure_easing_walks_back_up(self):
+        controller = self._controller()
+        policy = self._policy(controller, free=100)
+        policy.sample()
+        assert controller.level.value == "voice_shed"
+
+        policy.source = lambda: 60_000   # the card is free again
+        moved = policy.sample()
+
+        assert moved == "recover:full"
+        assert controller.admit("call-1").admitted is True
+
+    def test_recovery_needs_headroom_not_just_the_floor(self):
+        """Hysteresis: a box hovering at the threshold must not flap."""
+        controller = self._controller()
+        policy = self._policy(controller, free=100)
+        policy.sample()
+
+        policy.source = lambda: controller.sibling_floor_mib + 1
+        assert policy.sample() is None, "no headroom for the rung above"
+        assert controller.level.value == "voice_shed"
+
+    def test_an_unmeasurable_device_is_never_guessed_at(self):
+        controller = self._controller()
+        policy = self._policy(controller, free=None)
+
+        assert policy.sample() is None
+        assert controller.level.value == "full", "absence is not pressure"
+
+    def test_the_monitor_publishes_the_reading_it_decides_on(self):
+        from anita.capacity import CapacityMonitor
+
+        controller = self._controller()
+        metrics = MetricsRegistry()
+        monitor = CapacityMonitor(
+            self._policy(controller, free=100), metrics=metrics, source=lambda: 100
+        )
+
+        moved = monitor.tick()
+
+        assert metrics.get("gpu_free_mib").value == 100.0
+        assert moved == "degrade:voice_shed"
+
+    def test_the_monitor_reports_absence_rather_than_zero(self):
+        from anita.capacity import CapacityMonitor
+
+        controller = self._controller()
+        metrics = MetricsRegistry()
+        monitor = CapacityMonitor(
+            self._policy(controller, free=None), metrics=metrics, source=lambda: None
+        )
+
+        assert monitor.tick() is None
+        assert metrics.get("gpu_free_mib").value is None, "absent, not 0 MiB free"
+        assert controller.level.value == "full"
+
+    # -- the device policy --------------------------------------------------
+    def test_the_configured_capacity_numbers_reach_the_controller(self):
+        """TAC-7: a capacity key the code does not read is decoration."""
+        from anita.assembly import assemble
+        from anita.config import load_settings
+
+        settings = load_settings(env={"ANITA_ADMIN_TOKEN": "x"})
+        built = assemble(require_preflight=False)
+        admission = built.voice.admission
+
+        assert admission.anita_budget_mib == settings.vram.anita_budget_mib
+        assert admission.shared_card_mib == settings.vram.shared_card_mib
+        assert admission.sibling_floor_mib == settings.vram.sibling_floor_mib
+
+    def test_a_host_without_a_gpu_caps_voice_and_says_so(self):
+        from anita.assembly import assemble
+        from anita.config import load_settings
+        from anita.platform_detect import detect_platform, pick_model
+        from anita.speech import CPU_CONCURRENT_CALLS
+
+        settings = load_settings(env={"ANITA_ADMIN_TOKEN": "x"})
+        capable = pick_model(detect_platform(), settings).voice_capable
+
+        built = assemble(require_preflight=False)
+        admission = built.voice.admission
+
+        if capable:
+            assert admission.max_concurrent_calls == settings.speech.max_concurrent_calls
+        else:
+            assert admission.max_concurrent_calls == CPU_CONCURRENT_CALLS
+            assert any("voice capped" in note for note in built.notes)
+
+    def test_the_boot_report_matches_what_admission_does(self):
+        """The old text claimed a refusal no code implemented."""
+        from anita.boot import _phase_platform
+        from anita.config import load_settings
+        from anita.platform_detect import detect_platform, pick_model
+
+        settings = load_settings(env={"ANITA_ADMIN_TOKEN": "x"})
+        capable = pick_model(detect_platform(), settings).voice_capable
+        detail = _phase_platform(settings).detail
+
+        if capable:
+            assert "capped" not in detail
+        else:
+            assert "voice capped at 1" in detail
+            assert "refused" not in detail
+
+    def test_a_cpu_host_starts_no_monitor(self):
+        """Shedding releases ANITA's VRAM; a host that uses none must not shed.
+
+        Gating the monitor on `nvidia-smi` alone put one on a box whose speech
+        stack runs on CPU and degraded the ladder to `commercial_only` on the
+        first samples — disabling a working feature on a card ANITA was never
+        occupying.
+        """
+        from anita.assembly import assemble
+        from anita.speech import CPU_CONCURRENT_CALLS
+
+        built = assemble(require_preflight=False)
+        admission = built.voice.admission
+        if admission.max_concurrent_calls != CPU_CONCURRENT_CALLS:
+            return  # a GPU host: the monitor is supposed to be running there
+        assert admission.level.value == "full", "no monitor, no shed"
+        assert admission.active_calls() == 0

@@ -85,7 +85,46 @@ CREATE TABLE IF NOT EXISTS channel_session (
 );
 CREATE INDEX IF NOT EXISTS idx_channel_session_open
     ON channel_session (channel_kind, closed_at);
+
+-- US-003. Every refused request is counted by class. The point is not
+-- curiosity: "the webhook is returning 403 for everything" and "one attacker
+-- is probing" look identical in a request log and demand opposite responses.
+CREATE TABLE IF NOT EXISTS rejected_ingress (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    received_at TEXT NOT NULL,
+    route       TEXT NOT NULL,
+    reason      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rejected_ingress_at
+    ON rejected_ingress (received_at);
+
+-- US-003. `bucket_key` is a salted hash — the raw IP or phone number is never
+-- persisted by the limiter (TAC-8). The table exists so a rate-limit decision
+-- can be reviewed after the fact, which an in-memory counter cannot support.
+CREATE TABLE IF NOT EXISTS rate_limit_event (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    bucket_key  TEXT NOT NULL,
+    limit_class TEXT NOT NULL,
+    occurred_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rate_limit_event_bucket
+    ON rate_limit_event (bucket_key, limit_class, occurred_at);
 """
+
+# Columns added to `channel_session` after US-001 shipped. Guarded ALTER TABLE:
+# SQLite has no `ADD COLUMN IF NOT EXISTS`, and re-running a migration that
+# raises on the second boot is how a deploy loop becomes an outage.
+MIGRATIONS: tuple[tuple[str, str], ...] = (
+    ("channel_session", "close_reason TEXT"),
+    ("channel_session", "resumed_from_session_id TEXT"),
+)
+
+
+def bucket_key(value: str, *, salt: str = "anita") -> str:
+    """The limiter's key: salted SHA-256, never the raw identity."""
+    import hashlib
+
+    return hashlib.sha256(f"{salt}:{value}".encode("utf-8")).hexdigest()[:32]
 
 
 def _now() -> str:
@@ -102,7 +141,27 @@ class ChannelStore:
         self._connection.row_factory = sqlite3.Row
         with self._lock:
             self._connection.executescript(SCHEMA)
+            self._migrate()
             self._connection.commit()
+
+    def _migrate(self) -> None:
+        """Add columns that postdate the first release of a table.
+
+        Guarded by `PRAGMA table_info` rather than by catching the error: a
+        bare `ALTER` inside `try/except sqlite3.OperationalError` would also
+        swallow a genuine failure (a locked database, a corrupted file) and
+        leave the boot believing the migration ran.
+        """
+        for table, column in MIGRATIONS:
+            existing = {
+                str(row["name"])
+                for row in self._connection.execute(f"PRAGMA table_info({table})")
+            }
+            if not existing:
+                continue  # table absent on a fresh database; SCHEMA owns creation
+            name = column.split(" ", 1)[0]
+            if name not in existing:
+                self._connection.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
 
     # -- endpoints ---------------------------------------------------------
     def register_endpoint(
@@ -209,13 +268,23 @@ class ChannelStore:
 
     # -- sessions ----------------------------------------------------------
     def open_session(
-        self, *, channel_kind: str, session_key: str, conversation_id: str | None = None
+        self,
+        *,
+        channel_kind: str,
+        session_key: str,
+        conversation_id: str | None = None,
+        resumed_from: str | None = None,
     ) -> str:
         """Key a call on its stream id. Idempotent (`AC-6`).
 
         For a caller who withholds their number this is the *only* stable
         identity the call has, which is why it is the session key rather than
         the phone number.
+
+        `resumed_from` records the session this one continues (US-003's
+        reconnect window). It is written only on creation — a re-opened
+        session that already exists is the same session, not a resumption of
+        itself.
         """
         with self._lock:
             existing = self._connection.execute(
@@ -229,8 +298,10 @@ class ChannelStore:
             now = _now()
             self._connection.execute(
                 "INSERT INTO channel_session (id, channel_kind, session_key, "
-                "conversation_id, started_at, last_activity_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (session_id, channel_kind, session_key, conversation_id, now, now),
+                "conversation_id, started_at, last_activity_at, "
+                "resumed_from_session_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (session_id, channel_kind, session_key, conversation_id, now,
+                 now, resumed_from),
             )
             self._connection.commit()
             return session_id
@@ -244,13 +315,19 @@ class ChannelStore:
             )
             self._connection.commit()
 
-    def close_session(self, *, channel_kind: str, session_key: str) -> None:
-        """Idempotent: a call can end by `stop`, by socket drop, or by both."""
+    def close_session(self, *, channel_kind: str, session_key: str,
+                      reason: str = "") -> None:
+        """Idempotent: a call can end by `stop`, by socket drop, or by both.
+
+        The first reason wins. A session that closes as `idle` and is then
+        closed again by the socket teardown was idle — recording `socket_error`
+        would describe the teardown, not the session.
+        """
         with self._lock:
             self._connection.execute(
-                "UPDATE channel_session SET closed_at = ? "
+                "UPDATE channel_session SET closed_at = ?, close_reason = ? "
                 "WHERE channel_kind = ? AND session_key = ? AND closed_at IS NULL",
-                (_now(), channel_kind, session_key),
+                (_now(), (reason or None), channel_kind, session_key),
             )
             self._connection.commit()
 
@@ -276,4 +353,55 @@ class ChannelStore:
             params = (channel_kind,)
         with self._lock:
             rows = self._connection.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+
+    # -- refusals (US-003) -------------------------------------------------
+    def record_rejection(self, *, route: str, reason: str) -> None:
+        """Count a refused request by class. Never the body, never the key."""
+        with self._lock:
+            self._connection.execute(
+                "INSERT INTO rejected_ingress (received_at, route, reason) "
+                "VALUES (?, ?, ?)",
+                (_now(), str(route), str(reason)),
+            )
+            self._connection.commit()
+
+    def rejections(self, *, limit: int = 200) -> list[dict]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT received_at, route, reason FROM rejected_ingress "
+                "ORDER BY id DESC LIMIT ?",
+                (int(limit),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def rejection_counts(self) -> dict[str, int]:
+        """Refusals by reason. An operator reads classes, not rows."""
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT reason, COUNT(*) AS n FROM rejected_ingress GROUP BY reason"
+            ).fetchall()
+        return {str(row["reason"]): int(row["n"]) for row in rows}
+
+    def record_rate_limit(self, *, key: str, limit_class: str) -> None:
+        """Record that a bucket was refused. The key is hashed here, so no
+        caller can accidentally put a raw IP into the table (`TAC-8`)."""
+        with self._lock:
+            self._connection.execute(
+                "INSERT INTO rate_limit_event (bucket_key, limit_class, occurred_at) "
+                "VALUES (?, ?, ?)",
+                (bucket_key(key), str(limit_class), _now()),
+            )
+            self._connection.commit()
+
+    def rate_limit_events(self, *, limit_class: str | None = None,
+                          limit: int = 200) -> list[dict]:
+        query = "SELECT bucket_key, limit_class, occurred_at FROM rate_limit_event"
+        params: tuple = ()
+        if limit_class:
+            query += " WHERE limit_class = ?"
+            params = (str(limit_class),)
+        query += " ORDER BY id DESC LIMIT ?"
+        with self._lock:
+            rows = self._connection.execute(query, (*params, int(limit))).fetchall()
         return [dict(row) for row in rows]

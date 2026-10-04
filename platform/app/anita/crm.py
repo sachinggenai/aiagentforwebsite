@@ -195,6 +195,10 @@ class Handoff:
     lead_id: str
     reason: str
     state: str = "open"          # open | notified | acknowledged | closed | withdrawn
+    #: US-022: which conversation raised this. Carried separately because an
+    #: anonymous escalation has no lead, and putting a conversation id in
+    #: `lead_id` made the record look linked to a lead that does not exist.
+    conversation_id: str = ""
     sentiment_score: float | None = None
     products: list[str] = field(default_factory=list)
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -204,6 +208,7 @@ class Handoff:
         return {
             "handoff_id": self.handoff_id,
             "lead_id": self.lead_id,
+            "conversation_id": self.conversation_id,
             "reason": self.reason,
             "state": self.state,
             "sentiment_score": self.sentiment_score,
@@ -282,6 +287,7 @@ CREATE TABLE IF NOT EXISTS handoffs (
     state TEXT NOT NULL DEFAULT 'open',
     sentiment_score REAL,
     products TEXT DEFAULT '[]',
+    conversation_id TEXT DEFAULT '',
     created_at TEXT NOT NULL,
     notified_at TEXT
 );
@@ -315,6 +321,23 @@ class MockCrmStore:
         self._connection.row_factory = sqlite3.Row
         with self._lock:
             self._connection.executescript(SCHEMA)
+            self._connection.commit()
+            self._migrate()
+
+    def _migrate(self) -> None:
+        """Additive migrations for databases created before this version.
+
+        `CREATE TABLE IF NOT EXISTS` does not add a column to a table that
+        already exists, so a store written before US-022 keeps the old shape
+        without this.
+        """
+        columns = {
+            row["name"] for row in self._connection.execute("PRAGMA table_info(handoffs)")
+        }
+        if "conversation_id" not in columns:
+            self._connection.execute(
+                "ALTER TABLE handoffs ADD COLUMN conversation_id TEXT DEFAULT ''"
+            )
             self._connection.commit()
 
     # -- leads -------------------------------------------------------------
@@ -461,26 +484,61 @@ class MockCrmStore:
 
     # -- handoffs ----------------------------------------------------------
     def record_handoff(self, handoff: Handoff) -> Handoff:
-        """Idempotent per lead: two negative turns must not open two handoffs."""
+        """Idempotent per lead: two negative turns must not open two handoffs.
+
+        US-022: the store assigns the id when the caller passed none. It used to
+        insert `""` verbatim, so the first handoff took the empty PRIMARY KEY
+        and every later one failed the UNIQUE constraint — swallowed into
+        `dispatched=False`. **One handoff per database lifetime** was the real
+        behaviour.
+
+        An escalation with no lead is deduplicated per **conversation** instead,
+        so two anonymous callers do not collapse into one handoff — and so a
+        conversation id is never mistaken for a lead id.
+        """
         with self._lock:
+            if not handoff.handoff_id:
+                handoff.handoff_id = str(uuid.uuid4())
             existing = self._connection.execute(
-                "SELECT * FROM handoffs WHERE lead_id = ? AND state IN ('open','notified','acknowledged')",
-                (handoff.lead_id,),
+                "SELECT * FROM handoffs WHERE state IN ('open','notified','acknowledged')"
+                " AND lead_id = ? AND (? != '' OR conversation_id = ?)",
+                (handoff.lead_id, handoff.lead_id, handoff.conversation_id),
             ).fetchone()
             if existing:
                 return self._to_handoff(existing)
             self._connection.execute(
                 """INSERT INTO handoffs (handoff_id, lead_id, reason, state,
-                       sentiment_score, products, created_at, notified_at)
-                   VALUES (?,?,?,?,?,?,?,?)""",
+                       sentiment_score, products, conversation_id, created_at,
+                       notified_at)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
                 (
                     handoff.handoff_id, handoff.lead_id, handoff.reason, handoff.state,
                     handoff.sentiment_score, json.dumps(handoff.products),
-                    handoff.created_at, handoff.notified_at,
+                    handoff.conversation_id, handoff.created_at, handoff.notified_at,
                 ),
             )
             self._connection.commit()
         return handoff
+
+    def mark_notified(self, handoff_id: str) -> Handoff | None:
+        """Move a handoff to `notified`, once a rep has actually been told.
+
+        Separate from `record_handoff` on purpose: a handoff exists the moment
+        it is detected, and whether a human was reached is a different fact.
+        Recording the first as the second is how "we escalated" comes to mean
+        "nobody was told".
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._connection.execute(
+                "UPDATE handoffs SET state = 'notified', notified_at = ? WHERE handoff_id = ?",
+                (now, handoff_id),
+            )
+            self._connection.commit()
+            row = self._connection.execute(
+                "SELECT * FROM handoffs WHERE handoff_id = ?", (handoff_id,)
+            ).fetchone()
+        return self._to_handoff(row) if row else None
 
     def list_handoffs(self, *, state: str | None = None) -> list[Handoff]:
         query = "SELECT * FROM handoffs"
@@ -565,6 +623,7 @@ class MockCrmStore:
             lead_id=row["lead_id"],
             reason=row["reason"],
             state=row["state"],
+            conversation_id=row["conversation_id"] or "",
             sentiment_score=row["sentiment_score"],
             products=json.loads(row["products"] or "[]"),
             created_at=row["created_at"],

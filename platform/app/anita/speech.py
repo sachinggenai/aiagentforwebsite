@@ -57,6 +57,12 @@ VRAM_COMPONENTS: dict[str, int] = {
     "overhead": VRAM_OVERHEAD_MIB,
 }
 
+#: US-018: what a host with no CUDA device can actually honour. The configured
+#: ceiling assumes a GPU; on CPU the synthesizer runs at ~0.6x real time and
+#: contends with STT for the same cores, so one call is the honest number.
+#: Voice is **capped**, not refused — CPU transcription and synthesis work.
+CPU_CONCURRENT_CALLS = 1
+
 
 class DegradationLevel(str, Enum):
     """The ladder, in the order things are shed (US-018).
@@ -241,6 +247,33 @@ class AdmissionController:
                 message=BUSY_MESSAGE,
             )
         self._active[call_id] = self._clock()
+        return AdmissionDecision(True, level=self._level)
+
+    def peek(self, call_id: str) -> AdmissionDecision:
+        """Would this call be admitted, decided **without taking the slot**.
+
+        The browser-mic ticket needs this. A ticket that reserved a slot would
+        leak it whenever the buyer then denied the microphone permission — a
+        common, entirely expected outcome — and the ceiling would erode one
+        abandoned ticket at a time until the box refused calls while idle.
+        The ticket forecasts; the WebSocket handshake is the commitment.
+        """
+        if not self.voice_available:
+            return AdmissionDecision(
+                False,
+                reason=f"voice shed at level {self._level.value}",
+                level=self._level,
+                message=BUSY_MESSAGE,
+            )
+        if call_id in self._active:
+            return AdmissionDecision(True, reason="already admitted", level=self._level)
+        if self.active_calls() >= self.max_concurrent_calls:
+            return AdmissionDecision(
+                False,
+                reason=f"at capacity ({self.max_concurrent_calls} concurrent calls)",
+                level=self._level,
+                message=BUSY_MESSAGE,
+            )
         return AdmissionDecision(True, level=self._level)
 
     def release(self, call_id: str) -> bool:

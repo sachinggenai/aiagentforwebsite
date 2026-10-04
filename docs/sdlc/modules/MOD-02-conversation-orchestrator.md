@@ -105,6 +105,43 @@ Every turn writes a `turn` row (`state`, `classification`, `route`, `answer_ref`
 
 Consumers of the events: MOD-06 (lead link), MOD-07 (sentiment), MOD-08 (trace). No event is on the critical path — a dropped event costs a trace or a delayed sentiment score, never an answer.
 
+**As built (US-004 + US-006, 2026-10-04).** The names above are approximated by
+the shipped code rather than matched one-for-one; what exists and is driven:
+
+* `orchestrator.resolve_identity(envelope) → Identity` — precedence phone >
+  handle > session > anonymous, with phone normalisation at the boundary
+  (`98200 11122`, `+91 98200 11122` and `0091-9820011122` are one key; the +91
+  bridge for a bare 10-digit Indian mobile is the one assumption, documented in
+  the function).
+* `ConversationRegistry.resolve/close/sweep_idle/recover` over
+  `ConversationStore` (`conversation`, `identity_link`, `turn`) — a registry
+  miss falls back to the most recent in-window row, a closed thread yields a
+  **child** conversation with `parent_conversation_id`, and `identity_link` is
+  unique on `(type, value)` so two channels converge by constraint.
+* `Orchestrator.begin_turn/complete_turn` persist every turn with its
+  classification, route, answer ref, latency and state (`RECEIVED → CLASSIFIED
+  → ANSWERED | FAILED`), `seq` assigned `MAX(seq)+1` inside `BEGIN IMMEDIATE`
+  with `UNIQUE (conversation_id, seq)`.
+* `ConversationQueue` — one in-flight turn per conversation, depth from
+  `conversation.queue_depth`; overflow is a re-prompt, never a silent drop.
+  The whole turn (record → classify → answer → persist) holds the slot, which
+  is what fixed the interleaved-transcript defect.
+* `TurnRecorder` + `ReplayQueue` — a store failure buffers the turn and the
+  buyer still gets the answer; `ConversationJanitor` drains and sweeps.
+* Review: `AdminSurface.conversations/conversation` read the store, page the
+  transcript at 100 with `after_seq`, and distinguish `present` / `empty` /
+  `expired` (the last carries its date).
+
+**Recorded deviations.** SQLite, not Postgres (`CR-02` owns the swap); the
+store is synchronous behind one lock rather than `async` with a separate read
+pool, so `TAC-7`'s "reads never block writes" is **not** claimed — a large
+review page shares the connection with turn writes (fine at this volume,
+stated rather than assumed). Conversations are per identity, so a per-tab chat
+session and a phone call join through the lead plus seeded context rather than
+one row; the story's LLD model ("three conversations linked") was chosen over a
+single merged thread because a browser session id cannot be merged with a
+phone number without inventing the link.
+
 ### B.4 Data Model
 
 ```mermaid

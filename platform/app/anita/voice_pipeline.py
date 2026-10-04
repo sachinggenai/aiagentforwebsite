@@ -22,6 +22,10 @@ from typing import Callable
 
 # Installed once at boot by `assembly.build()`.
 _ANSWER: Callable[..., str] | None = None
+# US-006 TAC-5: teardown summarises the conversation. A seam rather than a
+# direct import because the relays (media_stream, browser_voice) must not
+# depend on the orchestrator — they move bytes, they do not own the thread.
+_FINISH: Callable[..., None] | None = None
 
 
 def install(orchestrator, engine) -> None:
@@ -32,20 +36,56 @@ def install(orchestrator, engine) -> None:
     linked to a lead. Routing the utterance through `begin_turn` is what creates
     that conversation and classifies the intent the engine's tree branches on.
     """
-    global _ANSWER
+    global _ANSWER, _FINISH
 
-    def _answer(question: str, *, session_key: str) -> str:
+    def _answer(question: str, *, session_key: str, caller: str = "",
+                channel_kind: str = "voice_inbound") -> str:
         from .channels import Channel, InboundEnvelope
 
+        # US-004: the caller's number, when the carrier gave us one. Without
+        # this the voice path could never recognise a buyer who had already
+        # talked to the web chat — the number was read off the stream and then
+        # dropped on the floor.
+        channels = {
+            "voice_inbound": Channel.VOICE_INBOUND,
+            "browser_mic": Channel.BROWSER_MIC,
+        }
         envelope = InboundEnvelope(
-            channel=Channel.VOICE_INBOUND, text=question, session_id=session_key
+            channel=channels.get(channel_kind, Channel.VOICE_INBOUND),
+            text=question,
+            identity=caller or None,
+            session_id=session_key,
         )
         conversation, routing = orchestrator.begin_turn(envelope)
         reply = engine.answer(routing.intent, question, conversation)
         orchestrator.complete_turn(conversation, reply.text, failed=reply.unavailable)
         return reply.text
 
+    def _finish(session_key: str, reason: str = "teardown") -> None:
+        conversation = (
+            orchestrator.registry.get(session_key)
+            or orchestrator.registry.recover(session_key)
+        )
+        if conversation is not None:
+            orchestrator.finalise(conversation, reason=reason)
+
     _ANSWER = _answer
+    _FINISH = _finish
+
+
+def finish_call(session_key: str, reason: str = "teardown") -> None:
+    """Summarise the call's conversation on teardown. Never raises.
+
+    The conversation is summarised, **not closed**: a buyer who calls and then
+    messages twenty minutes later should continue one thread, and closing on
+    every hang-up would fork it. The idle sweep owns closing.
+    """
+    if _FINISH is None or not session_key:
+        return
+    try:
+        _FINISH(session_key, reason)
+    except Exception:  # noqa: BLE001 - teardown must not depend on the summary
+        pass
 
 
 def run_rag_query_sync(
@@ -53,6 +93,8 @@ def run_rag_query_sync(
     channel: str = "voice",
     question: str | None = None,
     session_key: str = "",
+    caller: str = "",
+    channel_kind: str = "voice_inbound",
     **kwargs,
 ) -> str:
     """Answer one spoken turn.
@@ -75,4 +117,7 @@ def run_rag_query_sync(
             "voice answer engine is not installed — assembly.build() must call "
             "voice_pipeline.install() before a call can be answered"
         )
-    return _ANSWER(question or prompt, session_key=session_key or "voice")
+    return _ANSWER(
+        question or prompt, session_key=session_key or "voice",
+        caller=caller, channel_kind=channel_kind,
+    )

@@ -57,10 +57,14 @@ class TwilioMediaStream:
     JSON Twilio sends and assert what comes back.
     """
 
-    def __init__(self, *, session, send, admission=None) -> None:
+    def __init__(self, *, session, send, admission=None, store=None) -> None:
         self.session = session
         self._send = send
         self.admission = admission
+        # MOD-01's channel tables. Optional: a relay with no store still
+        # carries the call, it just cannot offer a stable identity for a caller
+        # who withheld their number, nor leave a row for a restart to reconcile.
+        self.store = store
 
         self.stream_sid = ""
         self.call_id = ""
@@ -130,6 +134,19 @@ class TwilioMediaStream:
 
         # The engine keys its trace and its conversation on this.
         self.session.call_id = self.call_id
+
+        # The session row is keyed on the stream SID, not the phone number: a
+        # caller who withholds their number has no other stable identity for
+        # this call (`AC-6`). Idempotent, so a duplicate `start` cannot open a
+        # second one.
+        if self.store is not None and self.stream_sid:
+            try:
+                self.store.open_session(
+                    channel_kind="voice_inbound", session_key=self.stream_sid
+                )
+            except Exception:  # noqa: BLE001 - bookkeeping must not drop a call
+                logger.exception("media stream: could not open the session row")
+
         logger.info("media stream: started (call %s)", _mask(self.call_id))
 
     async def _on_media(self, media: dict) -> None:
@@ -272,6 +289,16 @@ class TwilioMediaStream:
 
         if self.admission is not None and self.call_id:
             self.admission.release(self.call_id)
+
+        # Closing is idempotent on both sides: a call can end by Twilio `stop`,
+        # by socket drop, or by both, and the row must reflect the first.
+        if self.store is not None and self.stream_sid:
+            try:
+                self.store.close_session(
+                    channel_kind="voice_inbound", session_key=self.stream_sid
+                )
+            except Exception:  # noqa: BLE001 - teardown must not raise
+                logger.exception("media stream: could not close the session row")
 
         logger.info(
             "media stream: closed (%s, %d turn(s) transcribed)",

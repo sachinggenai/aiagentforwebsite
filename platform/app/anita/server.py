@@ -183,6 +183,7 @@ def create_app(router: Router, *, title: str = "ANITA MEDICAL SYSTEMS") -> FastA
                     session=router.voice_sessions(""),
                     send=websocket.send_json,
                     admission=router.voice.admission,
+                    store=getattr(router.voice, "store", None),
                 )
                 try:
                     while True:

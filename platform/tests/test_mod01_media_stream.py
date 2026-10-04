@@ -377,6 +377,62 @@ class TestTheSocketRoute:
         assert admission.active_calls() == 0
 
 
+class TestTheSessionRow:
+    """The relay keeps a session row keyed on the stream SID."""
+
+    @staticmethod
+    def _store():
+        from anita.channel_store import ChannelStore
+
+        return ChannelStore(":memory:")
+
+    def test_start_opens_a_session_keyed_on_the_stream_id(self):
+        store = self._store()
+        relay, _ = _relay()
+        relay.store = store
+        asyncio.run(relay.handle_message(json.dumps(_start())))
+
+        found = store.find_session(channel_kind="voice_inbound", session_key=STREAM_SID)
+        assert found is not None
+        assert found["closed_at"] is None
+
+    def test_a_duplicate_start_does_not_open_a_second_session(self):
+        store = self._store()
+        relay, _ = _relay()
+        relay.store = store
+        asyncio.run(relay.handle_message(json.dumps(_start())))
+        asyncio.run(relay.handle_message(json.dumps(_start())))
+        assert len(store.open_sessions()) == 1
+
+    def test_close_closes_the_session(self):
+        store = self._store()
+        relay, _ = _relay()
+        relay.store = store
+        asyncio.run(relay.handle_message(json.dumps(_start())))
+        asyncio.run(relay.close(reason="disconnect"))
+
+        assert store.open_sessions() == []
+
+    def test_a_broken_store_does_not_drop_the_call(self):
+        """Bookkeeping must never take a call down: the caller is mid-sentence
+        and the failure is ours, not theirs."""
+        class Broken:
+            def open_session(self, **kwargs):
+                raise RuntimeError("database is gone")
+
+            def close_session(self, **kwargs):
+                raise RuntimeError("database is gone")
+
+        session = FakeSession(end_after=99)
+        relay, _ = _relay(session)
+        relay.store = Broken()
+        asyncio.run(relay.handle_message(json.dumps(_start())))
+        asyncio.run(relay.handle_message(json.dumps(_media())))
+        asyncio.run(relay.close(reason="stop"))
+
+        assert session.frames_seen == 1, "the call continued despite the store"
+
+
 class TestCallIdIsNeverLoggedInFull:
     def test_the_mask_keeps_only_the_tail(self):
         """TAC-8 / REC-14: no caller identifier in a log line."""

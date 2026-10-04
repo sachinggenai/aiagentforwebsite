@@ -108,11 +108,22 @@ class VoiceWebhook:
         public_base_url: str,
         admission=None,
         callback_number: str = "",
+        store=None,
+        instance_id: str = "",
+        address: str = "",
+        channel_kind: str = "voice_inbound",
     ) -> None:
         self.auth_token = auth_token
         self.public_base_url = public_base_url
         self.admission = admission
         self.callback_number = callback_number
+        # MOD-01's channel tables. Optional so the webhook is usable without a
+        # store (tests, and an instance with no database), but wired in
+        # production — the two protections below are not decorations.
+        self.store = store
+        self.instance_id = instance_id
+        self.address = address
+        self.channel_kind = channel_kind
 
     def voice(self, *, params: dict, signature: str | None) -> tuple[int, str, str]:
         """Handle `POST /twilio/voice`. Returns ``(status, body, content_type)``.
@@ -133,6 +144,27 @@ class VoiceWebhook:
 
         call_id = str(params.get("CallSid") or "")
 
+        # Attribution: a valid signature proves Twilio sent it, not that this
+        # instance owns the number it was sent to. Answering for a number we do
+        # not own would make this product speak for the other one (`CG-1`,
+        # `BRD-03`, edge case 14).
+        endpoint = self._attribute(params)
+        if endpoint is False:
+            if self.store is not None:
+                self.store.mark_rejected(call_id, channel_kind=self.channel_kind)
+            return 403, "", "text/plain"
+
+        # Replay: Twilio retries a webhook it believes failed. A replayed
+        # CallSid must not open a second stream or start a second conversation.
+        if self.store is not None and call_id:
+            if self.store.claim_event(
+                call_id, channel_kind=self.channel_kind,
+                endpoint_id=(endpoint or {}).get("id"),
+            ) == "duplicate":
+                # 200, so Twilio stops retrying, and deliberately **no
+                # `<Stream>`**: the first delivery already owns this call.
+                return 200, f"{TwiML_HEADER}\n<Response/>\n", "application/xml"
+
         # Admission before TwiML. A refused call must never reach the point of
         # being handed a stream URL.
         if self.admission is not None:
@@ -144,6 +176,28 @@ class VoiceWebhook:
                 ), "application/xml"
 
         return 200, build_stream_twiml(self._ws_url(), call_id), "application/xml"
+
+    def _attribute(self, params: dict):
+        """Which endpoint this call arrived on.
+
+        Returns the endpoint row, or ``None`` when no store is wired (nothing to
+        check against), or ``False`` when the number is not ours.
+        """
+        if self.store is None or not self.address:
+            return None
+        called = str(params.get("To") or "").strip()
+        if not called:
+            # No `To` at all is not evidence of a foreign number; Twilio always
+            # sends it, and refusing on its absence would trade a real
+            # protection for a new way to drop calls.
+            return None
+        if called == self.address:
+            return self.store.find_endpoint(
+                channel_kind=self.channel_kind,
+                address=self.address,
+                instance_id=self.instance_id,
+            )
+        return False
 
     def status(self, *, params: dict, signature: str | None) -> tuple[int, str, str]:
         """Handle `POST /twilio/status`.

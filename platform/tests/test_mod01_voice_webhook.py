@@ -140,6 +140,102 @@ class TestAdmission:
         )
 
 
+class TestReplayAndAttribution:
+    """The two channel-table protections, at the webhook.
+
+    Twilio retries a webhook it believes failed, and a signature proves only
+    that Twilio sent it — not that this instance owns the number it was sent
+    to.
+    """
+
+    @staticmethod
+    def _store():
+        from anita.channel_store import ChannelStore
+
+        store = ChannelStore(":memory:")
+        store.register_endpoint(
+            channel_kind="voice_inbound", provider="twilio",
+            address="+12792365960", instance_id="anita",
+            secret_ref="TWILIO_AUTH_TOKEN",
+        )
+        return store
+
+    def _hook(self, store):
+        return VoiceWebhook(
+            auth_token=TOKEN, public_base_url=PUBLIC, admission=None,
+            callback_number="+12792365960", store=store,
+            instance_id="anita", address="+12792365960",
+        )
+
+    def test_the_first_delivery_gets_a_stream(self):
+        store = self._store()
+        _, body, _ = self._hook(store).voice(params=CALL, signature=_signed(CALL))
+        assert "<Stream" in body
+
+    def test_a_replayed_call_sid_gets_no_second_stream(self):
+        """A replay must not open a second media stream for one call."""
+        store = self._store()
+        hook = self._hook(store)
+        hook.voice(params=CALL, signature=_signed(CALL))
+
+        status, body, _ = hook.voice(params=CALL, signature=_signed(CALL))
+
+        assert status == 200, "200 so Twilio stops retrying"
+        assert "<Stream" not in body, "a replay opened a second stream"
+
+    def test_a_different_call_still_gets_a_stream(self):
+        store = self._store()
+        hook = self._hook(store)
+        hook.voice(params=CALL, signature=_signed(CALL))
+
+        other = {"CallSid": "CA9999999999", "To": "+12792365960"}
+        _, body, _ = hook.voice(params=other, signature=_signed(other))
+        assert "<Stream" in body
+
+    def test_a_call_to_a_number_we_do_not_own_is_refused(self):
+        """Edge case 14: valid signature, someone else's number."""
+        store = self._store()
+        foreign = {"CallSid": "CA-foreign", "To": "+15550001111"}
+
+        status, body, _ = self._hook(store).voice(
+            params=foreign, signature=_signed(foreign)
+        )
+
+        assert status == 403
+        assert body == ""
+
+    def test_the_foreign_call_is_recorded_not_dropped(self):
+        store = self._store()
+        foreign = {"CallSid": "CA-foreign", "To": "+15550001111"}
+        self._hook(store).voice(params=foreign, signature=_signed(foreign))
+
+        assert store.event_disposition("CA-foreign") == "rejected"
+
+    def test_a_refused_foreign_call_consumes_no_capacity(self):
+        from anita.speech import AdmissionController
+
+        admission = AdmissionController(max_concurrent_calls=1)
+        store = self._store()
+        hook = VoiceWebhook(
+            auth_token=TOKEN, public_base_url=PUBLIC, admission=admission,
+            callback_number="+12792365960", store=store,
+            instance_id="anita", address="+12792365960",
+        )
+        foreign = {"CallSid": "CA-foreign", "To": "+15550001111"}
+        hook.voice(params=foreign, signature=_signed(foreign))
+
+        assert admission.active_calls() == 0
+        assert admission.outcomes["refused"] == 0, (
+            "a foreign number is not a capacity refusal and must not be counted "
+            "as one"
+        )
+
+    def test_without_a_store_the_webhook_still_answers(self):
+        """An instance with no database answers; it just cannot deduplicate."""
+        _, body, _ = _webhook().voice(params=CALL, signature=_signed(CALL))
+        assert "<Stream" in body
+
+
 class TestStatusCallback:
     def test_a_terminal_status_releases_the_slot(self):
         admission = AdmissionController(max_concurrent_calls=1)

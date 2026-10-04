@@ -318,20 +318,50 @@ Two defects were found **by these tests**, not by review: `_on_media` fed frames
 teardown, and a close could have released a slot twice. One test bug of my own was also corrected —
 it admitted two calls into a controller whose ceiling was 1.
 
+### The channel tables (`channel_store.py`, 2026-10-04)
+
+Three tables, each earning its place by making a specific failure impossible rather than unlikely:
+
+| Table | The failure it removes |
+|---|---|
+| `inbound_event` | **Replay.** Twilio retries a webhook it believes failed; a replayed `CallSid` must not open a second media stream or start a second conversation. The provider's own event id is the primary key, so the guarantee is the database's — the same reasoning as the unique partial indexes on leads |
+| `channel_endpoint` | **Attribution.** A valid signature proves Twilio sent it, not that this instance owns the number. Answering for a number we do not own would make this product speak for the other one (`CG-1`, `BRD-03`, edge case 14) |
+| `channel_session` | **Identity.** Keyed on the stream SID, so a caller who withheld their number still has one stable identity for the call (`AC-6`) |
+
+**SQLite, not Postgres, and deliberately so.** US-001's LLD gives this DDL in Postgres dialect
+(`uuid`, `jsonb`, `timestamptz`, `gen_random_uuid()`), but CR-02 owns that swap and is blocked on
+Q9–Q12, with the recorded constraint that changing the persistence layer and the modules at once
+makes every regression ambiguous. These are the same tables in the dialect the platform runs, behind
+the same seam the `CrmStore` Protocol established — so CR-02 moves them rather than rewriting them.
+
+**Two divergences from the LLD, recorded rather than absorbed:**
+
+* `endpoint_id` is **nullable**. The story has it `NOT NULL REFERENCES channel_endpoint(id)`, but an
+  event from an unrecognised number is exactly the one that must be *recorded as rejected*, and it
+  has no endpoint to point at. A placeholder row would put a fictional endpoint in the table.
+* `channel_kind` uses the `Channel` enum's `voice_inbound`, not the story's `inbound_call` — the
+  value the conversation actually carries, and consistency within the code is worth more than
+  agreement with prose.
+
+**Verified:** `+12792365960` is registered at boot against instance `anita` with
+`secret_ref = TWILIO_AUTH_TOKEN` (the *name*, never the value — `REC-21`). A 20-thread barrier race
+on the same `CallSid` produces **exactly one** `accepted`; replay protection survives a reopen of
+the real database file; a foreign number is refused **and** recorded as `rejected` without consuming
+capacity; and a broken store does not drop a call in progress.
+
 ### Still to build for US-001
 
 1. **The STT leg cannot be exercised yet.** Everything either side of it is proven — the relay
    protocol, the answer path, and Kokoro TTS (RTF 0.60) — but **µ-law → Whisper cannot run while
    Smart App Control blocks `import av`**. Until that is off (B3 above) the full audio round trip
    is untested, and a real call would fail at transcription.
-2. **Schema** — `channel_endpoint`, `inbound_event`, `channel_session`.
-3. **Public ingress** — a Cloudflare tunnel, which is also what clears the remaining `TUNNEL_HOST`
+2. **Public ingress** — a Cloudflare tunnel, which is also what clears the remaining `TUNNEL_HOST`
    degradation. Quick tunnels change hostname on every restart, so Twilio's webhook must be
    re-pointed each time; the source had a `scripts/update_twilio_webhook.py` for this, which is
    **not** in this repo.
-4. **Not yet implemented from the story:** the 30-minute call cap (`TAC-6`) and the three-strike
+3. **Not yet implemented from the story:** the 30-minute call cap (`TAC-6`) and the three-strike
    unintelligible-utterance path (`AC-7`).
-5. **Verification** — `T-01…T-17`, then a real call to `+12792365960`.
+4. **Verification** — `T-01…T-17`, then a real call to `+12792365960`.
 
 ---
 

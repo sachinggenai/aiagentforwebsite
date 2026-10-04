@@ -364,11 +364,45 @@ def assemble(
     # uses, so a call refused here is a call the platform knows it refused.
     from .voice_webhook import VoiceWebhook
 
+    # The channel tables (US-001). Best-effort: a platform that cannot open its
+    # own database should still answer, and the two protections they carry are
+    # reported as missing rather than silently absent.
+    channel_store = None
+    voice_number = (settings.env.get("TWILIO_PHONE_NUMBER", "") or "").strip()
+    try:
+        from pathlib import Path as _Path
+
+        from .channel_store import ChannelStore
+
+        log_dir = _Path(settings.isolation.log_dir)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        channel_store = ChannelStore(log_dir / "anita_channels.sqlite")
+        if voice_number:
+            # Declaring the number is what makes attribution possible: without
+            # the row, every inbound call is unattributable and the webhook
+            # cannot tell our number from the sibling's.
+            channel_store.register_endpoint(
+                channel_kind="voice_inbound",
+                provider="twilio",
+                address=voice_number,
+                instance_id=settings.isolation.db_schema,
+                secret_ref="TWILIO_AUTH_TOKEN",
+            )
+    except Exception as exc:  # noqa: BLE001 - a store failure must not stop the boot
+        logger.warning("channel store unavailable: %s", exc)
+        notes.append(
+            f"channel store unavailable ({exc}) — inbound calls cannot be "
+            f"deduplicated or attributed to this number"
+        )
+
     voice = VoiceWebhook(
         auth_token=twilio_token,
         public_base_url=public_base_url,
         admission=admission,
         callback_number=settings.env.get("ANITA_CALLBACK_NUMBER", ""),
+        store=channel_store,
+        instance_id=settings.isolation.db_schema,
+        address=voice_number,
     )
 
     admin = AdminSurface(

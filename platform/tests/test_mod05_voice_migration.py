@@ -295,3 +295,47 @@ class _NullEmbedder:
 
     def embed_query(self, text):
         return [0.0] * 8
+
+
+class TestTheAudioScaleContract:
+    """`_prepare_audio` and `_transcribe` are a pair, and must stay one.
+
+    `_prepare_audio` scales to int16; `_transcribe` divides by 32768 immediately
+    before calling faster-whisper. Changing either alone presents the model with
+    audio that is 32768x too loud or 32768x too quiet — and both fail as a
+    *hallucination*, not as an exception, so nothing raises and the call simply
+    answers the wrong thing.
+
+    This guard exists because that mistake was made for real: passing int16
+    straight to `model.transcribe()` (skipping `_transcribe`) made one
+    synthesised utterance come back as "I love you so much!" instead of "how
+    much is the ultrasound gel" — which looked exactly like a product bug and
+    was an artefact of the test.
+    """
+
+    def test_prepare_audio_returns_int16(self):
+        from anita import voice
+
+        session = voice.VoiceCallSession()
+        pcm = (b"\x00\x10" * 320)
+        prepared = session._prepare_audio(voice.pcm_to_ulaw(pcm))
+        assert prepared.dtype.name == "int16", (
+            "_prepare_audio now returns "
+            f"{prepared.dtype}; _transcribe divides by 32768 and expects int16"
+        )
+
+    def test_transcribe_normalises_the_int16_it_is_given(self):
+        """The other half of the pair, asserted from the source.
+
+        A behavioural test would need a loaded model; this asserts the
+        conversion is still there, which is the thing that can silently vanish.
+        """
+        import inspect
+
+        from anita import voice
+
+        source = inspect.getsource(voice.VoiceCallSession._transcribe)
+        assert "/ 32768.0" in source, (
+            "_transcribe no longer normalises int16 to float32; if the scaling "
+            "moved into _prepare_audio, update both and this test together"
+        )

@@ -29,6 +29,19 @@ faster-whisper>=1.1,<2.0
 kokoro-onnx>=0.4,<1.0
 onnxruntime>=1.18
 
+# PyAV arrives as a faster-whisper dependency and `import faster_whisper`
+# touches it immediately (`faster_whisper/audio.py:15`), so a blocked PyAV
+# takes the whole STT path down even though the call path never decodes a file.
+#
+# On Windows, Smart App Control refuses three of PyAV 19.0.1's extension
+# modules (`av/dictionary.pyd`, `av/index.pyd`, `av/audio/stream.pyd`) while
+# leaving the other 64 and all 23 bundled FFmpeg DLLs alone. 18.0.0 is not
+# flagged. Measured, not assumed: 19.0.1 fails to import, 18.0.0 imports and
+# transcribes real speech.
+#
+# Remove this ceiling once PyAV 19+ imports on the target machine.
+av>=18,<19
+
 # `audioop` was removed from the stdlib in Python 3.13. The migrated engine
 # converts every frame through it (voice.py:238,243), so on 3.13+ the audio
 # path raises ImportError on the first frame. `audioop-lts` restores the same

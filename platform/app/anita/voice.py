@@ -996,6 +996,14 @@ class VoiceCallSession:
         Two copies of this would be two chances to transcribe the same audio
         two different ways, and the bug would show up as an intermittent
         transcript difference on a call.
+
+        Returns **int16**, which is what `_transcribe` expects: it does the
+        int16 -> float32 normalisation itself, immediately before calling
+        faster-whisper. The two belong together — `_prepare_audio` scales to
+        int16 and `_transcribe` scales back — and a change to one without the
+        other produces audio that is either 32768x too loud or 32768x too
+        quiet. Both fail as a Whisper hallucination rather than as an error,
+        which is why this pairing is stated here rather than left implicit.
         """
         pcm_bytes = ulaw_to_pcm(ulaw)
         audio_8k = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0

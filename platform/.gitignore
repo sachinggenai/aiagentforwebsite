@@ -1,0 +1,15 @@
+# Secrets. The root .gitignore covers `.env`, but not the backup variants —
+# and a backup copy of a credential is still a credential. universityDemo
+# carries `.env.bak-*` files holding live Twilio values, which is the reason
+# this file exists rather than relying on the root rule alone.
+.env
+.env.*
+!.env.example
+
+# Runtime artefacts
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+logs/
+data/

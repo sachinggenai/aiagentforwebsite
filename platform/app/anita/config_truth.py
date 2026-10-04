@@ -261,9 +261,19 @@ def audit_config(
         elif key in STRUCTURAL_READ_KEYS:
             state = "LIVE"
             readers = ["declared_indirect_read"]
-        elif source == "template":
+        elif source == "template" or key in _KNOWN_PLATFORM_KEYS:
             # Declared for a module that has not landed yet — documented, not
             # broken. Refusing here would make every partial build fail.
+            #
+            # `_KNOWN_PLATFORM_KEYS` is consulted as well as the source, because
+            # where a key was *written* is not what decides whether the platform
+            # expects it. The Twilio credentials copied into `.env` came from the
+            # environment rather than the template, so they were classified
+            # INERT — "set but never read" — when the truth was that the
+            # platform declares them and the modules that read them (WhatsApp,
+            # voice) are two of the deferred use cases. Where a value came from
+            # is an accident of how it was installed; whether the platform
+            # declares the key is the fact that matters.
             state = "PENDING"
         else:
             state = "INERT"

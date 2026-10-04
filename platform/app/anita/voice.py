@@ -502,21 +502,48 @@ LINE_QUALITY_REPLY = (
     "Could you try speaking a little closer to the phone?"
 )
 
-#: Step 3 — change the channel instead of repeating the same sentence.
-ALT_CHANNEL_REPLY = (
-    "The connection doesn't seem to be improving. You can also reach us "
-    "on WhatsApp or email the admissions office, and we'll get back to "
-    "you quickly."
-)
-
-#: Step 4+ — human-transfer offer. Never loop the identical sentence.
+#: Step 3 — the human-transfer offer, and the last thing the caller hears.
+#:
+#: An `ALT_CHANNEL_REPLY` used to sit between these, offering "WhatsApp or
+#: email". Two things were wrong with it here: inbound WhatsApp is a declared
+#: deferral on this product (UC-02 in `config/anita.yaml`), so the assistant was
+#: naming a channel it cannot answer on; and it made the human offer the
+#: *fourth* rung where `AC-7` puts it at the third. The offer now names only
+#: what exists, and "a human or a callback" is one rung rather than two.
 HUMAN_TRANSFER_REPLY = (
-    "I'm sorry, I'm still not able to hear you clearly. I'll ask a human "
-    "counselor to call you back. Could you tell me once more which number "
-    "we should reach?"
+    "I'm sorry — the line still isn't clear enough for me to help. "
+    "I'll ask someone from our team to call you back. "
+    "Could you tell me once more which number we should reach?"
 )
 
-_NOISE_LADDER = [NOISE_REPLY, LINE_QUALITY_REPLY, ALT_CHANNEL_REPLY, HUMAN_TRANSFER_REPLY]
+#: `AC-7`: three consecutive unintelligible utterances, then a human.
+#: The last rung is terminal — after it the call closes.
+_NOISE_LADDER = [NOISE_REPLY, LINE_QUALITY_REPLY, HUMAN_TRANSFER_REPLY]
+
+#: `TAC-6` fallback if the settings object cannot supply a ceiling.
+_DEFAULT_MAX_CALL_SECONDS = 1800
+
+
+def _max_call_seconds() -> int:
+    """Read the call ceiling at SESSION construction, like the VAD delay.
+
+    Read per call rather than once at import, so a deployment can change the
+    ceiling without a rebuild and a test can construct a session with a short
+    one. A value nobody can reach is not a setting.
+    """
+    try:
+        from .voice_settings import settings
+
+        return int(getattr(settings, "MAX_CALL_SECONDS", _DEFAULT_MAX_CALL_SECONDS))
+    except Exception:  # noqa: BLE001 - a settings failure must not lose the cap
+        return _DEFAULT_MAX_CALL_SECONDS
+
+
+#: Said when the ceiling is reached. Spoken once, then the call ends.
+CALL_CAP_REPLY = (
+    "I'm sorry, I've not been able to help on this call. "
+    "I'll ask someone from our team to call you back — goodbye."
+)
 
 # ── D1 output-boundary scrubber ────────────────────────────────────────
 # Leaked reasoning/meta narration observed in real calls. Sentence-level
@@ -647,6 +674,12 @@ class VoiceCallSession:
         self._sample_rate = sample_rate
         self.direction = direction
         self._noise_streak = 0  # consecutive noise-gated turns
+        # TAC-6. Started at construction, which is when the session is created
+        # for a call — the relay builds one per media stream, so this is the
+        # call's own clock rather than the process's.
+        self._call_started = _time.monotonic()
+        self._max_call_seconds = _max_call_seconds()
+        self._capped = False
         self.call_id = ""       # set by the WS handler (stream_sid)
 
         # US-012: the per-call TTS cache. Unused while TTS_CACHE_SCOPE is
@@ -1015,18 +1048,44 @@ class VoiceCallSession:
             audio_16k = np.repeat(audio_8k, 2)
         return (audio_16k * 32767).clip(-32768, 32767).astype(np.int16)
 
-    def _noise_reply(self) -> str:
+    def _noise_reply(self) -> tuple[str, bool]:
         """
-        Fixed reply for noise-gated turns (D4 escalation ladder):
+        Fixed reply for noise-gated turns (D4 escalation ladder, AC-7):
           1st miss  → plain retry
           2nd miss  → line-quality hint
-          3rd miss  → alternate channel (WhatsApp/email)
-          4th+ miss → human-transfer offer
+          3rd miss  → human-transfer offer, and the call ENDS
+
         Each step is a DIFFERENT sentence — never the identical line twice
         in a row, which is the defect this ladder exists to prevent.
+
+        Returns ``(reply, end_call)``. The third rung is terminal. AC-7 asks for
+        a human or a callback *and* for the call to close cleanly; a ladder that
+        only repeats its last rung would leave a caller who cannot be heard on
+        the line indefinitely, holding one of the two admission slots.
         """
         self._noise_streak += 1
-        return _NOISE_LADDER[min(self._noise_streak - 1, len(_NOISE_LADDER) - 1)]
+        rung = min(self._noise_streak, len(_NOISE_LADDER)) - 1
+        return _NOISE_LADDER[rung], self._noise_streak >= len(_NOISE_LADDER)
+
+    # -- TAC-6: the call ceiling -------------------------------------------
+    def call_seconds(self) -> float:
+        """How long this call has been up."""
+        return _time.monotonic() - self._call_started
+
+    def call_expired(self) -> bool:
+        """True once the call has reached its ceiling.
+
+        Public so the media relay can ask on every inbound frame: the ceiling
+        has to fire when *nothing* is happening — which is exactly when no turn
+        is being processed and no other method of this class is called.
+        """
+        if self._capped:
+            return False
+        return self.call_seconds() >= self._max_call_seconds
+
+    def mark_capped(self) -> None:
+        """Record that the ceiling has been announced, so it is said once."""
+        self._capped = True
 
     def is_silent(self, ulaw_chunk: bytes) -> bool:
         """
@@ -1107,6 +1166,28 @@ class VoiceCallSession:
         end_call is True when a hard sign-off cue was detected (the caller
         should hang up after playing the returned audio).
         """
+        # ── TAC-6: the call ceiling, checked before anything else ──────────
+        # Before the empty-buffer return, deliberately: the case this exists
+        # for is a call where end-of-speech never succeeds, so by definition
+        # there may be no audio to process. Checking later would mean the cap
+        # only ever fired on calls that did not need it.
+        if self.call_expired():
+            self.mark_capped()
+            logger.warning(
+                "VoiceCall: call ceiling reached at %.0fs — closing",
+                self.call_seconds(),
+            )
+            self.log_event("CALL_CAPPED", seconds=round(self.call_seconds(), 1))
+            self.reset_utterance()
+            tts_pcm = await self._synthesise(CALL_CAP_REPLY)
+            dialogue = f"Assistant: {CALL_CAP_REPLY}"
+            self._conversation_history.append(dialogue)
+            if tts_pcm is None or len(tts_pcm) == 0:
+                # Nothing to play, but the call still ends: an uncapped silent
+                # call holds an admission slot forever.
+                return [], dialogue, True
+            return _turn_outcome(self._pcm_to_ulaw_chunks(tts_pcm)), dialogue, True
+
         if not self._audio_buffer:
             self.reset_utterance()
             return [], "", False
@@ -1173,14 +1254,14 @@ class VoiceCallSession:
             # VAD removed all audio (pure noise/echo) — one quick check
             # line is better than dead air; the LLM never sees this.
             logger.info("VoiceCall: no speech in utterance — fixed fallback reply")
-            reply = self._noise_reply()
+            reply, end_call = self._noise_reply()
             dialogue = f"Caller: (unintelligible)\nAssistant: {reply}"
             self._conversation_history.append(f"Caller: (unintelligible)")
             self._conversation_history.append(f"Assistant: {reply}")
             tts_pcm = await self._synthesise(reply)
             if tts_pcm is None or len(tts_pcm) == 0:
-                return [], dialogue, False
-            return _turn_outcome(self._pcm_to_ulaw_chunks(tts_pcm)), dialogue, False
+                return [], dialogue, end_call
+            return _turn_outcome(self._pcm_to_ulaw_chunks(tts_pcm)), dialogue, end_call
 
         logger.info(f"VoiceCall: transcript = \"{transcript[:120]}\"")
 
@@ -1194,13 +1275,13 @@ class VoiceCallSession:
                 f"VoiceCall: noise-gated \"{transcript[:60]}\" "
                 f"(low_conf={low_conf}) — fixed fallback reply"
             )
-            reply = self._noise_reply()
+            reply, end_call = self._noise_reply()
             dialogue = f"Caller: {transcript}\nAssistant: {reply}"
             self._conversation_history.append(f"Assistant: {reply}")
             tts_pcm = await self._synthesise(reply)
             if tts_pcm is None or len(tts_pcm) == 0:
-                return [], dialogue, False
-            return _turn_outcome(self._pcm_to_ulaw_chunks(tts_pcm)), dialogue, False
+                return [], dialogue, end_call
+            return _turn_outcome(self._pcm_to_ulaw_chunks(tts_pcm)), dialogue, end_call
 
         # Real speech decoded — reset the noise streak.
         self._noise_streak = 0

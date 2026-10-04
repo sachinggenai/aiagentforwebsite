@@ -359,9 +359,42 @@ capacity; and a broken store does not drop a call in progress.
    degradation. Quick tunnels change hostname on every restart, so Twilio's webhook must be
    re-pointed each time; the source had a `scripts/update_twilio_webhook.py` for this, which is
    **not** in this repo.
-3. **Not yet implemented from the story:** the 30-minute call cap (`TAC-6`) and the three-strike
-   unintelligible-utterance path (`AC-7`).
-4. **Verification** — `T-01…T-17`, then a real call to `+12792365960`.
+3. **Verification** — `T-01…T-17`, then a real call to `+12792365960`.
+
+### TAC-6 and AC-7 — implemented 2026-10-04
+
+Both were previously listed here as not implemented. They are now built and tested (17 tests).
+
+**`AC-7` — the unintelligible-utterance ladder.** The ladder already existed but had two defects
+that made it fail the criterion:
+
+* It never *ended* the call. The last rung repeated forever, so a caller who could not be heard
+  stayed on the line indefinitely holding one of the two admission slots.
+* Its third rung offered **WhatsApp or email** — and inbound WhatsApp is a deferral on this
+  product (`UC-02`), so the assistant was naming a channel it cannot answer on. The human-transfer
+  offer sat at the *fourth* rung, where `AC-7` puts it at the third.
+
+Three rungs now, the third terminal: plain retry, line-quality hint, then a human callback offer
+after which the call closes with the transcript retained. A test asserts no rung names a deferred
+channel, so the WhatsApp text cannot come back.
+
+**`TAC-6` — the call ceiling.** Nothing existed: no duration tracking at all. A call that never
+reached end-of-speech ran until someone hung up.
+
+`MAX_CALL_SECONDS` (default 1800) is declared in `config/anita.yaml`, parsed into `SpeechSettings`,
+exposed through the engine's settings shim, and read **per session** like the VAD delay — a value
+nobody can reach is not a setting. The check sits at the top of `process_utterance`, *before* the
+empty-buffer return, because the case it exists for is a call where there may be no audio at all.
+The relay asks `call_expired()` on every inbound frame, since frames are the only thing arriving on
+a silent call, and forces the turn so the closing line is spoken and the call tears down through
+the normal path rather than a special one. The ceiling is announced once (`mark_capped`), so
+subsequent frames cannot re-trigger it.
+
+**One test was rewritten rather than deleted.** `test_the_engine_is_a_faithful_copy` compared the
+copied engine's definition list against the source's, which both changes violate. Its intent —
+catch an accidental rewrite of experimentally-derived tuning — is still worth keeping, so it now
+allows **exactly** the documented divergences and fails on anything else. It caught an entry I had
+forgotten to list, which is the guard working.
 
 ---
 

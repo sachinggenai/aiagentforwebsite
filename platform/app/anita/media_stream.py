@@ -156,6 +156,17 @@ class TwilioMediaStream:
             # stream ended. Feeding them would append audio to a conversation
             # that has been closed and whose slot is already released.
             return
+        # TAC-6. Frames are the only thing arriving on a call where nothing is
+        # happening, so this is the one place the ceiling can be noticed during
+        # silence — and a call that never reaches end-of-speech is exactly the
+        # call the cap exists for. Forcing the turn lets `process_utterance`
+        # speak the closing line and return `end_call`, which tears the call
+        # down through the normal path rather than a special one.
+        if getattr(self.session, "call_expired", None) is not None:
+            if self.session.call_expired():
+                self._begin_turn()
+                return
+
         payload = media.get("payload")
         if not payload:
             return

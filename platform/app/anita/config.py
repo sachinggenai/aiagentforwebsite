@@ -233,6 +233,11 @@ class SpeechSettings:
     barge_in_enabled: bool = True
     tts_stream: bool = True
     max_concurrent_calls: int = 2
+    # TAC-6. A call with no successful end-of-speech is closed at this ceiling
+    # rather than left open: a line that is silent because the audio path is
+    # broken stays silent forever, and an uncapped call holds one of the two
+    # admission slots until someone notices.
+    max_call_seconds: int = 1800
 
 
 @dataclass(frozen=True)
@@ -475,6 +480,7 @@ def load_settings(
             barge_in_enabled=_env_bool(environment, "BARGE_IN_ENABLED", bool(speech_raw.get("barge_in_enabled", SpeechSettings.barge_in_enabled))),
             tts_stream=_env_bool(environment, "TTS_STREAM", bool(speech_raw.get("tts_stream", SpeechSettings.tts_stream))),
             max_concurrent_calls=_env_int(environment, "MAX_CONCURRENT_CALLS", int(speech_raw.get("max_concurrent_calls", SpeechSettings.max_concurrent_calls))),
+            max_call_seconds=_env_int(environment, "MAX_CALL_SECONDS", int(speech_raw.get("max_call_seconds", SpeechSettings.max_call_seconds))),
         ),
         sentiment=SentimentSettings(
             w1=_env_float(environment, "SENTIMENT_W1", float(sent_raw.get("w1", SentimentSettings.w1))),

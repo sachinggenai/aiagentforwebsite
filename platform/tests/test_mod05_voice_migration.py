@@ -27,14 +27,19 @@ class TestMigrationIntegrity:
     def test_the_engine_is_a_faithful_copy(self):
         """The turn loop must not have been edited in transit — a rewritten
         engine would lose the barge-in and echo-gate tuning that was derived
-        experimentally against real phone audio."""
+        experimentally against real phone audio.
+
+        The copy is allowed to differ from the source by **exactly** the
+        divergences US-001 requires, listed below. Anything else still fails,
+        which is the property this test exists for: a deliberate, traceable
+        change and an accidental rewrite must not look the same.
+        """
         source = Path("D:/project/universityDemo/app/voice_handler.py")
         if not source.exists():
             pytest.skip("source repo not available")
         copied = (ANITA / "voice.py").read_text(encoding="utf-8")
         original = source.read_text(encoding="utf-8")
 
-        # Only the import lines should differ.
         # Compare the *definitions*, not byte equality: prose legitimately
         # names the source module, and the import lines were retargeted.
         def definitions(text: str) -> list[str]:
@@ -43,7 +48,33 @@ class TestMigrationIntegrity:
                 if re.match(r"\s*(def |class |async def )", line)
             ]
 
-        assert definitions(copied) == definitions(original), "the engine was altered in transit"
+        copied_defs = definitions(copied)
+        source_defs = definitions(original)
+
+        # AC-7 makes the third rung terminal, so `_noise_reply` now reports
+        # whether the call should end. TAC-6 adds the call ceiling. Both are
+        # requirements the source predates.
+        DELIBERATE_GONE = {"def _noise_reply(self) -> str:"}
+        DELIBERATE_NEW = {
+            "def _noise_reply(self) -> tuple[str, bool]:",
+            "def call_seconds(self) -> float:",
+            "def call_expired(self) -> bool:",
+            "def mark_capped(self) -> None:",
+            "def _max_call_seconds() -> int:",
+        }
+
+        missing = set(source_defs) - DELIBERATE_GONE - set(copied_defs)
+        assert not missing, (
+            f"the engine was altered in transit — source definitions are gone: "
+            f"{sorted(missing)}"
+        )
+
+        added = set(copied_defs) - set(source_defs)
+        assert added == DELIBERATE_NEW, (
+            f"definitions changed without a recorded reason: "
+            f"{sorted(added - DELIBERATE_NEW)}"
+        )
+
         # And the tuning constants must survive verbatim.
         for constant in ("BARGE_IN_ABS_FLOOR =", "BARGE_IN_ECHO_GAIN =", "VAD_SILENCE_MS ="):
             assert constant in copied
@@ -339,3 +370,154 @@ class TestTheAudioScaleContract:
             "_transcribe no longer normalises int16 to float32; if the scaling "
             "moved into _prepare_audio, update both and this test together"
         )
+
+
+class TestAC7UnintelligibleLadder:
+    """AC-7: three unintelligible utterances, then a human, then the call ends.
+
+    Before this, the ladder repeated its last rung forever: a caller who could
+    not be heard stayed on the line indefinitely, holding one of the two
+    admission slots, and the human-transfer offer was never reached because the
+    rung that should have carried it offered WhatsApp instead — a channel this
+    product defers (UC-02).
+    """
+
+    def _session(self):
+        from anita import voice
+
+        return voice.VoiceCallSession()
+
+    def test_the_ladder_has_three_rungs(self):
+        from anita import voice
+
+        assert len(voice._NOISE_LADDER) == 3, "AC-7 puts the human offer third"
+
+    def test_the_first_two_misses_do_not_end_the_call(self):
+        session = self._session()
+        for expected in ("hear", "line"):
+            reply, end_call = session._noise_reply()
+            assert isinstance(reply, str) and reply
+            assert end_call is False, "a caller gets three attempts"
+
+    def test_the_third_miss_offers_a_human_and_ends_the_call(self):
+        session = self._session()
+        session._noise_reply()
+        session._noise_reply()
+        reply, end_call = session._noise_reply()
+
+        assert end_call is True, "AC-7 requires the call to close cleanly"
+        lowered = reply.lower()
+        assert "call you back" in lowered or "someone from our team" in lowered
+
+    def test_every_rung_is_a_different_sentence(self):
+        """The defect the ladder exists to prevent: never the identical line
+        twice in a row."""
+        session = self._session()
+        replies = [session._noise_reply()[0] for _ in range(3)]
+        assert len(set(replies)) == 3
+
+    def test_the_ladder_does_not_run_past_its_last_rung(self):
+        session = self._session()
+        for _ in range(10):
+            reply, end_call = session._noise_reply()
+        assert reply  # no IndexError, and still speakable
+        assert end_call is True
+
+    def test_no_rung_promises_a_deferred_channel(self):
+        """UC-02 defers inbound WhatsApp; the assistant must not offer it."""
+        from anita import voice
+
+        for rung in voice._NOISE_LADDER:
+            assert "whatsapp" not in rung.lower()
+
+    def test_real_speech_resets_the_ladder(self):
+        """A caller who is heard again is not one step from being cut off."""
+        session = self._session()
+        session._noise_reply()
+        session._noise_reply()
+        session._noise_streak = 0  # what process_utterance does on real speech
+        _, end_call = session._noise_reply()
+        assert end_call is False
+
+
+class TestTAC6CallCeiling:
+    """TAC-6: a call that never reaches end-of-speech is capped and closed."""
+
+    def _session(self, ceiling=1800):
+        from anita import voice
+
+        session = voice.VoiceCallSession()
+        session._max_call_seconds = ceiling
+        return session
+
+    def test_a_fresh_call_has_not_expired(self):
+        assert self._session(ceiling=1800).call_expired() is False
+
+    def test_the_ceiling_is_configurable(self):
+        from anita.config import SpeechSettings
+
+        assert SpeechSettings.max_call_seconds == 1800
+
+    def test_a_call_past_its_ceiling_has_expired(self):
+        session = self._session(ceiling=1800)
+        session._call_started -= 1801
+        assert session.call_expired() is True
+
+    def test_the_ceiling_is_announced_once(self):
+        """Otherwise every subsequent frame would re-trigger the closing line."""
+        session = self._session(ceiling=1800)
+        session._call_started -= 1801
+        assert session.call_expired() is True
+        session.mark_capped()
+        assert session.call_expired() is False
+
+    def test_a_capped_call_closes_with_the_closing_line(self):
+        """Driven through `process_utterance`, so this is the real path.
+
+        The speak step is stubbed: synthesis needs Kokoro, and what is under
+        test is the decision to close, not the audio.
+        """
+        import asyncio
+
+        import numpy as np
+
+        session = self._session(ceiling=1800)
+        session._call_started -= 1801
+
+        async def fake_synthesise(text):
+            # What Kokoro returns: float32 PCM at 24 kHz. `_pcm_to_ulaw_chunks`
+            # resamples and chunks it, so the shape matters even in a stub.
+            return np.zeros(24000, dtype=np.float32)
+
+        session._synthesise = fake_synthesise
+
+        chunks, dialogue, end_call = asyncio.run(session.process_utterance())
+
+        assert end_call is True, "a capped call must end"
+        assert "goodbye" in dialogue.lower()
+        assert chunks, "the caller hears why before the line closes"
+
+    def test_the_cap_fires_even_with_no_audio_to_process(self):
+        """The case the ceiling exists for: end-of-speech never succeeds, so
+        there is by definition nothing buffered."""
+        import asyncio
+
+        session = self._session(ceiling=1800)
+        session._call_started -= 1801
+        assert not session._audio_buffer
+
+        async def fake_synthesise(text):
+            return None  # synthesis also unavailable
+
+        session._synthesise = fake_synthesise
+        chunks, dialogue, end_call = asyncio.run(session.process_utterance())
+
+        assert end_call is True, "a silent capped call must still close"
+        assert chunks == [], "no audio, but the call ends"
+
+    def test_an_uncapped_call_is_untouched(self):
+        import asyncio
+
+        session = self._session(ceiling=1800)
+        chunks, dialogue, end_call = asyncio.run(session.process_utterance())
+        assert (chunks, dialogue, end_call) == ([], "", False)

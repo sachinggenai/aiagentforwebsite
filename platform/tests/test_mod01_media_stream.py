@@ -441,3 +441,61 @@ class TestCallIdIsNeverLoggedInFull:
         assert _mask("CA1234567890abcdef") == "…cdef"
         assert "CA1234" not in _mask("CA1234567890abcdef")
         assert _mask("") == "****"
+
+
+class TestTheCallCeiling:
+    """TAC-6 at the relay: the cap has to fire when nothing is happening.
+
+    Frames are the only thing arriving on a call that never reaches
+    end-of-speech, so the per-frame check is the only place the ceiling can be
+    noticed during silence -- which is exactly the call it exists for.
+    """
+
+    class CappedSession(FakeSession):
+        async def process_utterance(self, chunk_sink=None):
+            self.processed += 1
+            return [b"\x11" * 160], "Assistant: goodbye", True
+
+        def call_expired(self) -> bool:
+            return True
+
+    def test_a_capped_call_is_closed_by_the_relay(self):
+        admission = AdmissionController(max_concurrent_calls=2)
+        admission.admit("call-1")
+        session = self.CappedSession()
+        relay, sent = _relay(session, admission)
+
+        asyncio.run(relay.handle_message(json.dumps(_start())))
+        asyncio.run(relay.handle_message(json.dumps(_media())))
+        if relay._turn is not None:
+            asyncio.run(relay._turn)
+
+        assert session.processed == 1, "the ceiling forced a turn"
+        assert relay._closed, "the call closed rather than running on"
+        assert admission.active_calls() == 0, "and released its slot"
+        assert _media_events(sent), "the caller heard why before the line closed"
+
+    def test_an_uncapped_call_is_left_alone(self):
+        session = FakeSession(end_after=99)
+        relay, _ = _relay(session)
+        asyncio.run(relay.handle_message(json.dumps(_start())))
+        asyncio.run(relay.handle_message(json.dumps(_media())))
+        assert session.processed == 0
+        assert not relay._closed
+
+    def test_a_session_without_the_cap_still_works(self):
+        """The relay must not require the method -- a session double, or a
+        future engine, should not have to implement the ceiling to be driven."""
+        class NoCap:
+            call_id = ""
+
+            def feed_audio(self, frame):
+                return False
+
+            def admit_inbound_frame(self, frame):
+                return FRAME_LISTENING
+
+        relay, _ = _relay(NoCap())
+        asyncio.run(relay.handle_message(json.dumps(_start())))
+        asyncio.run(relay.handle_message(json.dumps(_media())))
+        assert not relay._closed

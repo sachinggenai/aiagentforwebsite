@@ -84,6 +84,9 @@ speech:
   barge_in_enabled: true
   tts_stream: true
   max_concurrent_calls: 2
+  # TAC-6: cap a call that never reaches a successful end-of-speech, so a
+  # broken audio path cannot hold an admission slot indefinitely.
+  max_call_seconds: 1800
 
 sentiment:
   w1: 0.30

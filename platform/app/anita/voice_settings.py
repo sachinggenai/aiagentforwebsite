@@ -64,6 +64,7 @@ class VoiceSettings:
     VAD_SPECULATIVE_ADVANCE_MS: int
     BARGE_IN_ENABLED: bool
     TTS_STREAM: bool
+    MAX_CALL_SECONDS: int
 
     # -- carried from the source (experimentally derived) -----------------
     BARGE_IN_MARGIN: float
@@ -105,6 +106,7 @@ def build_voice_settings(env: Mapping[str, str] | None = None) -> VoiceSettings:
         VAD_SPECULATIVE_ADVANCE_MS=anita.vad_speculative_advance_ms,
         BARGE_IN_ENABLED=anita.barge_in_enabled,
         TTS_STREAM=anita.tts_stream,
+        MAX_CALL_SECONDS=anita.max_call_seconds,
         # Carried from the source; env-overridable, never silently recomputed.
         BARGE_IN_MARGIN=_float("BARGE_IN_MARGIN", 1.6, environment),
         BARGE_IN_ABS_FLOOR=_float("BARGE_IN_ABS_FLOOR", 380.0, environment),

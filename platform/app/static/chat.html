@@ -501,6 +501,14 @@ async function startVoice() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ session_id: sessionId }),
     });
+    // A rejected request is not a busy box. Without this check a 400 or 500
+    // fell through to `!ticket.admitted` below and the caller was told "all our
+    // voice lines are busy" while the instance sat idle — observed on a real
+    // phone the first time this ran over a tunnel.
+    if (!res.ok) {
+      degrade("dropped");
+      return;
+    }
     ticket = await res.json();
   } catch {
     degrade("dropped");

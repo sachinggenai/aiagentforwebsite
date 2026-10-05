@@ -51,8 +51,17 @@ FAILED = "FAILED"
 # The documented schedule (`TAC-4`): 5 s, 30 s, 2 m, 8 m, 15 m. Its length is
 # the retry budget — a sixth constant here and a sixth attempt there would be
 # two ways to express one number, so the budget is derived from the schedule.
-BACKOFF_SECONDS: tuple[int, ...] = (5, 30, 120, 480, 900)
-MAX_ATTEMPTS = len(BACKOFF_SECONDS)
+# The documented schedule (`TAC-4`, `CG-4`): exponential backoff from 5 s to a
+# 15-minute ceiling, with a budget of 5 attempts.
+#
+# Five attempts means four waits, so the 15-minute value is the ceiling the
+# series approaches — not a wait any send performs. The old tuple put the
+# ceiling where a wait belonged, and `mark_retry` fails the row at the attempt
+# budget anyway, so the fifth rung was scheduled by nothing (§8.26). The
+# constants now say which is which.
+BACKOFF_SECONDS: tuple[int, ...] = (5, 30, 120, 480)   # the waits actually applied
+BACKOFF_CEILING_SECONDS = 900                          # 5 s → 15 min: the documented ceiling
+MAX_ATTEMPTS = len(BACKOFF_SECONDS) + 1                # 5 attempts: the send + 4 retries
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS outbound_send (
@@ -92,13 +101,17 @@ def _parse(text: str) -> datetime:
 def backoff(attempt: int) -> timedelta:
     """How long to wait after `attempt` failed.
 
-    `attempt` is the 1-based number of the attempt that just failed. Past the
-    end of the schedule the last value is held — unreachable through
-    `mark_retry` (which fails the row first) but defined so a caller asking
-    about attempt 9 gets an answer rather than an IndexError.
+    `attempt` is the 1-based number of the attempt that just failed. The series
+    is exponential — 5 s, 30 s, 2 m, 8 m — and past its end the documented
+    15-minute ceiling is held, so a caller asking about attempt 9 gets an
+    answer rather than an IndexError. Within the budget the ceiling is never
+    scheduled: the fourth wait is the last one before `mark_retry` fails the
+    row at `MAX_ATTEMPTS`.
     """
     index = max(1, int(attempt)) - 1
-    return timedelta(seconds=BACKOFF_SECONDS[min(index, len(BACKOFF_SECONDS) - 1)])
+    if index >= len(BACKOFF_SECONDS):
+        return timedelta(seconds=BACKOFF_CEILING_SECONDS)
+    return timedelta(seconds=BACKOFF_SECONDS[index])
 
 
 class SendFailed(RuntimeError):

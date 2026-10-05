@@ -329,7 +329,12 @@ def main(argv: list[str] | None = None) -> int:
         for item in list(system_report.broken)[:10]:
             print(f"          unreachable: {item}")
 
-    validation = combine_validation(gate_report, browser_report, system_report)
+    # §8.24: the citation counts travel with the verdict. They used to be
+    # printed and then dropped here, so a provenance regression was visible in
+    # the log and could not refuse a promotion.
+    validation = combine_validation(
+        gate_report, browser_report, system_report, citations=citations
+    )
 
     print("\n" + "=" * 88)
     print(f"  RESULT: {'PASS — promotion permitted' if validation['passed'] else 'FAIL — promotion refused'}")

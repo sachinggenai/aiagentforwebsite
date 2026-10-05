@@ -18,7 +18,10 @@ without rewriting the engine's call sites.
 
 from __future__ import annotations
 
+import logging
 from typing import Callable
+
+logger = logging.getLogger("anita.voice_pipeline")
 
 # Installed once at boot by `assembly.build()`.
 _ANSWER: Callable[..., str] | None = None
@@ -41,6 +44,7 @@ def install(orchestrator, engine) -> None:
     def _answer(question: str, *, session_key: str, caller: str = "",
                 channel_kind: str = "voice_inbound") -> str:
         from .channels import Channel, InboundEnvelope
+        from .orchestrator import QueueFull
 
         # US-004: the caller's number, when the carrier gave us one. Without
         # this the voice path could never recognise a buyer who had already
@@ -56,10 +60,34 @@ def install(orchestrator, engine) -> None:
             identity=caller or None,
             session_id=session_key,
         )
-        conversation, routing = orchestrator.begin_turn(envelope)
-        reply = engine.answer(routing.intent, question, conversation)
-        orchestrator.complete_turn(conversation, reply.text, failed=reply.unavailable)
-        return reply.text
+
+        # §8.25: the turn runs under the conversation's single slot, the same
+        # way the chat surface runs it (`surfaces.ChatSurface.post_message`).
+        # The voice leg used to call `begin_turn` directly, so a conversation
+        # that a buyer had also touched over web chat could interleave its
+        # turns — the defect US-006's queue exists to kill, fixed on the chat
+        # side and missed on this one.
+        conversation = orchestrator.registry.resolve(envelope)
+
+        def run_turn() -> str:
+            record, routing = orchestrator.begin_turn(envelope)
+            reply = engine.answer(routing.intent, question, record)
+            orchestrator.complete_turn(record, reply.text, failed=reply.unavailable)
+            return reply.text
+
+        try:
+            return orchestrator.submit_turn(conversation.conversation_id, run_turn)
+        except QueueFull:
+            # A caller on a live line cannot be re-prompted the way the chat
+            # surface re-prompts with a 429: the alternative to answering is
+            # silence on a phone call. Depth is 20 turns waiting on ONE
+            # conversation, so this is pathological, and answering inline is
+            # the least-bad reading — and it is logged, never silent.
+            logger.warning(
+                "voice: conversation queue full; answering inline (conversation %s)",
+                conversation.conversation_id[:8],
+            )
+            return run_turn()
 
     def _finish(session_key: str, reason: str = "teardown") -> None:
         conversation = (

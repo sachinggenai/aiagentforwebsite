@@ -28,7 +28,6 @@ from anita.orchestrator import (  # noqa: E402
     Orchestrator,
     normalise_phone,
     resolve_identity,
-    resolve_whatsapp_session,
 )
 
 NOW = datetime(2026, 10, 4, 12, 0, 0, tzinfo=timezone.utc)
@@ -190,28 +189,6 @@ class TestContinuity:
         )
         second, _ = _registry(store)
         assert second.recover("tab-9") is None
-
-    def test_resolve_whatsapp_session_is_the_named_fallback(self):
-        store = ConversationStore(":memory:")
-        registry, _ = _registry(store)
-        conversation = registry.resolve(_envelope(
-            "hi", channel=Channel.WHATSAPP, identity="+919820011122"))
-
-        found = resolve_whatsapp_session(
-            "9820011122", idle_window_seconds=6 * 3600, store=store,
-            registry=registry,
-        )
-        assert found is not None and found.key == conversation.key
-
-        store._connection.execute(
-            "UPDATE conversation SET last_activity_at = ? WHERE id = ?",
-            ((NOW - timedelta(hours=7)).isoformat(), conversation.conversation_id),
-        )
-        assert resolve_whatsapp_session(
-            "9820011122", idle_window_seconds=6 * 3600, store=store,
-            registry=ConversationRegistry(store=store),
-        ) is None
-
 
 # ---------------------------------------------------------------------------
 # The lead link (AC-1, TAC-4)

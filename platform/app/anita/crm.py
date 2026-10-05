@@ -244,14 +244,6 @@ class CrmStore(Protocol):
 
     def list_handoffs(self, *, state: str | None = None) -> list[Handoff]: ...
 
-    def enqueue(self, operation: str, payload: dict) -> str: ...
-
-    def pending_outbox(self, limit: int = 50) -> list[dict]: ...
-
-    def mark_sent(self, outbox_id: str) -> None: ...
-
-    def mark_failed(self, outbox_id: str, error: str) -> None: ...
-
 
 # ---------------------------------------------------------------------------
 # Mock implementation
@@ -293,16 +285,10 @@ CREATE TABLE IF NOT EXISTS handoffs (
 );
 CREATE INDEX IF NOT EXISTS idx_handoffs_state ON handoffs (state);
 
-CREATE TABLE IF NOT EXISTS crm_outbox (
-    outbox_id TEXT PRIMARY KEY,
-    operation TEXT NOT NULL,
-    payload TEXT NOT NULL,
-    attempts INTEGER NOT NULL DEFAULT 0,
-    next_attempt_at TEXT NOT NULL,
-    last_error TEXT,
-    created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_outbox_due ON crm_outbox (next_attempt_at);
+-- `crm_outbox` was removed 2026-10-04 (§8.28): a second, unused queue. The
+-- live outbound queue is `outbox.SendOutbox`; this table had no producer or
+-- consumer in the product, only in tests. An existing database keeps the
+-- table, harmless and unread.
 """
 
 
@@ -549,48 +535,6 @@ class MockCrmStore:
         with self._lock:
             rows = self._connection.execute(query + " ORDER BY created_at", params).fetchall()
         return [self._to_handoff(row) for row in rows]
-
-    # -- outbox (REC-07 pattern) -------------------------------------------
-    def enqueue(self, operation: str, payload: dict) -> str:
-        outbox_id = str(uuid.uuid4())
-        now = datetime.now(timezone.utc).isoformat()
-        with self._lock:
-            self._connection.execute(
-                """INSERT INTO crm_outbox (outbox_id, operation, payload, attempts,
-                       next_attempt_at, created_at) VALUES (?,?,?,0,?,?)""",
-                (outbox_id, operation, json.dumps(payload), now, now),
-            )
-            self._connection.commit()
-        return outbox_id
-
-    def pending_outbox(self, limit: int = 50) -> list[dict]:
-        now = datetime.now(timezone.utc).isoformat()
-        with self._lock:
-            rows = self._connection.execute(
-                """SELECT * FROM crm_outbox WHERE next_attempt_at <= ?
-                   ORDER BY next_attempt_at LIMIT ?""",
-                (now, limit),
-            ).fetchall()
-        return [dict(row) for row in rows]
-
-    def mark_sent(self, outbox_id: str) -> None:
-        with self._lock:
-            self._connection.execute("DELETE FROM crm_outbox WHERE outbox_id = ?", (outbox_id,))
-            self._connection.commit()
-
-    def mark_failed(self, outbox_id: str, error: str, *, delay_seconds: float = 60.0) -> None:
-        """Back off, and give up after ten attempts rather than retrying forever."""
-        from datetime import timedelta
-
-        next_attempt = (datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)).isoformat()
-        with self._lock:
-            self._connection.execute(
-                """UPDATE crm_outbox SET attempts = attempts + 1, last_error = ?,
-                       next_attempt_at = ? WHERE outbox_id = ?""",
-                (error[:500], next_attempt, outbox_id),
-            )
-            self._connection.execute("DELETE FROM crm_outbox WHERE attempts >= 10")
-            self._connection.commit()
 
     # -- helpers -----------------------------------------------------------
     @staticmethod

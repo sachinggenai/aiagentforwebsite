@@ -363,16 +363,10 @@ class ConversationStore:
                 return None
         return record
 
-    def conversations_for_identity(
-        self, *, identity_type: str, identity_value: str, limit: int = 10
-    ) -> list[ConversationRecord]:
-        with self._lock:
-            rows = self._connection.execute(
-                "SELECT * FROM conversation WHERE identity_type = ? "
-                "AND identity_value = ? ORDER BY last_activity_at DESC LIMIT ?",
-                (identity_type, identity_value, int(limit)),
-            ).fetchall()
-        return [ConversationRecord.from_row(row) for row in rows]
+    # `conversations_for_identity` was removed 2026-10-04 (§8.28): no caller
+    # anywhere. `lead_for_identity` and `find_recent` cover the identity
+    # lookups the product performs, and a second, unused query beside them is
+    # the "looks wired, isn't" surface the sweep exists to remove.
 
     def touch(self, conversation_id: str, *, now: datetime | None = None) -> None:
         with self._lock:
@@ -448,6 +442,30 @@ class ConversationStore:
                 "SELECT id FROM conversation WHERE state = 'CLOSED' "
                 "AND summary_updated_at IS NULL ORDER BY closed_at LIMIT ?",
                 (int(limit),),
+            ).fetchall()
+        return [str(row["id"]) for row in rows]
+
+    def transcripts_due_for_expiry(
+        self, *, older_than_days: float, limit: int = 100,
+        now: datetime | None = None,
+    ) -> list[str]:
+        """Conversations whose transcript is past the retention window.
+
+        The read half of `expire_transcript`: that method removes one
+        conversation's turns and stamps the date, and until now nothing ever
+        called it, so the review's `expired` state was unreachable outside
+        tests (§8.28). A conversation with no turns is not selected — there is
+        nothing to expire, and stamping it would turn "nobody spoke" into
+        "policy deleted this".
+        """
+        cutoff = _iso((now or _now()) - timedelta(days=float(older_than_days)))
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT id FROM conversation WHERE last_activity_at < ? "
+                "AND transcript_expired_at IS NULL AND EXISTS ("
+                "  SELECT 1 FROM turn WHERE turn.conversation_id = conversation.id"
+                ") ORDER BY last_activity_at LIMIT ?",
+                (cutoff, int(limit)),
             ).fetchall()
         return [str(row["id"]) for row in rows]
 

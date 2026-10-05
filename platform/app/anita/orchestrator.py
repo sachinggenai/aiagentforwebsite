@@ -717,27 +717,11 @@ class ConversationRegistry:
         return len(self._by_key)
 
 
-def resolve_whatsapp_session(    phone_number: str, *, idle_window_seconds: float, store=None,
-    registry: "ConversationRegistry | None" = None,
-) -> Conversation | None:
-    """The three-level fallback the story names (`TAC-2`).
-
-    Registry → most recent in-window `conversation` row → None (the caller
-    opens a new one). Idempotent for the same phone inside the window: every
-    call after the first returns the same conversation.
-    """
-    phone = normalise_phone(phone_number) or phone_number
-    if registry is not None:
-        found = registry.get(phone)
-        if found is not None and found.state is not ConversationState.CLOSED:
-            return found
-    if store is None:
-        return None
-    record = store.find_recent(
-        identity_type=IdentityType.PHONE.value, identity_value=phone,
-        within_seconds=idle_window_seconds,
-    )
-    return None if record is None else registry._from_record(record) if registry else None
+# `resolve_whatsapp_session` was removed 2026-10-04 (§8.28): no caller in the
+# product, and it was wrong if one had appeared — it returned `None` on the
+# registry-less path even after finding a record. `ConversationRegistry.recover`
+# is the fallback actually used, and the WhatsApp path reaches it through the
+# ordinary identity resolution.
 
 
 # ---------------------------------------------------------------------------
@@ -938,6 +922,67 @@ class Orchestrator:
         """Close idle conversations and summarise them. Returns how many."""
         return self.registry.sweep_idle()
 
+    def retry_summaries(self, *, limit: int = 50) -> int:
+        """Re-summarise closed conversations whose summary never landed.
+
+        `write_summary` is guarded on `summary_updated_at IS NULL`, so a retry
+        is idempotent and cannot overwrite a good summary (`TAC-5`). Nothing
+        called it before this — a summary lost to a transient store failure
+        stayed lost, and `unsummarised_closed`, the query that finds them, had
+        no caller at all (§8.28).
+
+        Returns how many were **retried**; a retry that fails again is logged
+        and will be picked up on the next tick, because the guard is still
+        unset.
+        """
+        store = self.registry.store
+        if store is None:
+            return 0
+        try:
+            pending = set(store.unsummarised_closed(limit=limit))
+        except Exception:  # noqa: BLE001 - a read failure is retried next tick
+            logger.exception("summary retry: could not read the pending list")
+            return 0
+        if not pending:
+            return 0
+        with self.registry._lock:  # noqa: SLF001 - the registry owns this map
+            candidates = [
+                conversation for conversation in self.registry._by_key.values()
+                if conversation.conversation_id in pending
+            ]
+        for conversation in candidates:
+            self.registry._summarise(conversation, reason="retry")  # noqa: SLF001
+        return len(candidates)
+
+    def expire_transcripts(self, *, retention_days: float, limit: int = 100) -> int:
+        """Retention (`DG-11`): drop transcripts past the window, keep the row.
+
+        The conversation row keeps `transcript_expired_at`, so the review can
+        say the transcript expired *with its date* rather than showing an empty
+        transcript that could equally be a conversation nobody said anything
+        in (`AC-7`, `UC-13` E1). The store has had `expire_transcript` since
+        US-006 and nothing ever called it (§8.28) — which made that state
+        unreachable outside tests.
+        """
+        store = self.registry.store
+        if store is None:
+            return 0
+        try:
+            due = store.transcripts_due_for_expiry(
+                older_than_days=retention_days, limit=limit
+            )
+        except Exception:  # noqa: BLE001 - retried next tick
+            logger.exception("retention: could not read the due list")
+            return 0
+        expired = 0
+        for conversation_id in due:
+            try:
+                store.expire_transcript(conversation_id)
+                expired += 1
+            except Exception:  # noqa: BLE001 - one bad row must not stop the sweep
+                logger.exception("retention: expiring %s failed", conversation_id[:8])
+        return expired
+
     def _lock_for(self, conversation_id: str) -> threading.RLock:
         with self._guard:
             if conversation_id not in self._locks:
@@ -963,18 +1008,25 @@ class ConversationJanitor:
     """
 
     def __init__(self, *, orchestrator: Orchestrator, interval_s: float = 60.0,
-                 on_event=None) -> None:
+                 on_event=None, retention_days: float = 0.0) -> None:
         self.orchestrator = orchestrator
         self.interval_s = float(interval_s)
         self._on_event = on_event
+        # `DG-11`: 0 disables retention, so a deployment that has not decided a
+        # window keeps everything rather than silently deleting on a default.
+        self.retention_days = float(retention_days)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.swept = 0
         self.replayed = 0
+        self.resummarised = 0
+        self.expired = 0
 
     def run_once(self) -> dict:
         swept = 0
         replayed = 0
+        resummarised = 0
+        expired = 0
         try:
             swept = self.orchestrator.sweep_idle()
         except Exception:  # noqa: BLE001 - a sweep failure is retried next tick
@@ -985,11 +1037,31 @@ class ConversationJanitor:
                 replayed = recorder.drain()
             except Exception:  # noqa: BLE001
                 logger.exception("janitor: replay drain failed")
+        # US-006 TAC-5: a summary lost to a transient store failure is retried
+        # rather than lost for good (§8.28).
+        try:
+            resummarised = self.orchestrator.retry_summaries()
+        except Exception:  # noqa: BLE001
+            logger.exception("janitor: summary retry failed")
+        # `DG-11`: retention runs only when a window is configured.
+        if self.retention_days > 0:
+            try:
+                expired = self.orchestrator.expire_transcripts(
+                    retention_days=self.retention_days
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("janitor: retention sweep failed")
         self.swept += swept
         self.replayed += replayed
-        if swept or replayed:
-            self._emit("conversation.janitor", {"swept": swept, "replayed": replayed})
-        return {"swept": swept, "replayed": replayed}
+        self.resummarised += resummarised
+        self.expired += expired
+        if swept or replayed or resummarised or expired:
+            self._emit("conversation.janitor", {
+                "swept": swept, "replayed": replayed,
+                "resummarised": resummarised, "expired": expired,
+            })
+        return {"swept": swept, "replayed": replayed,
+                "resummarised": resummarised, "expired": expired}
 
     def start(self) -> None:
         if self._thread is not None:

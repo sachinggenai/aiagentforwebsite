@@ -717,10 +717,15 @@ def assemble(
             AdapterRegistry,
             ExtraChannelConfig,
             ExtraChannelIngress,
+            credential_probe,
         )
 
         extra_raw = settings.channels.extra
-        extra_registry = AdapterRegistry()
+        # §8.27: `enable()` declares → validates → **probes** → enables, and the
+        # probe was never wired, so the third step never ran in any deployment.
+        # The probe reads the deployed environment, not `os.environ`, so it
+        # answers for the same values the ingress will authenticate with.
+        extra_registry = AdapterRegistry(probe=credential_probe(settings.env))
         if extra_raw.id:
             extra_registry.declare(ExtraChannelConfig(
                 id=extra_raw.id,
@@ -761,7 +766,7 @@ def assemble(
 
     admin = AdminSurface(
         registry=registry, gateway=gateway, admission=admission,
-        metrics=metrics, gate=gate, traces=traces, crm=crm, outbox=outbox,
+        metrics=metrics, gate=gate, crm=crm, outbox=outbox,
         store=conversation_store,
     )
 
@@ -770,7 +775,14 @@ def assemble(
     # only when the store exists — a janitor over an in-memory registry would
     # be a thread that closes conversations nobody can review.
     if conversation_store is not None:
-        janitor = ConversationJanitor(orchestrator=orchestrator, interval_s=60.0)
+        janitor = ConversationJanitor(
+            orchestrator=orchestrator,
+            interval_s=60.0,
+            # `DG-11`: the retention window is the operator's number, and the
+            # sweep that enforces it runs here rather than in a cron nobody
+            # wired.
+            retention_days=settings.conversation.retention_days,
+        )
         janitor.start()
 
     router = build_router(

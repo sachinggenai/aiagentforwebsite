@@ -499,6 +499,78 @@ class TestChatSerialisation:
         assert all(b > a for a, b in zip(user_seqs, answer_seqs))
 
 
+class TestVoiceSerialisation:
+    """§8.25 — the voice leg takes the same per-conversation slot as chat.
+
+    US-006's queue was wired into `ChatSurface.post_message` and the voice
+    pipeline was missed: it called `begin_turn` directly, so a conversation a
+    buyer had also touched over web chat could still interleave. The
+    reproduction is the chat test's race, driven through the voice entry point.
+    """
+
+    class _Retriever:
+        def retrieve(self, query, **kwargs):
+            from anita.retrieval import GateDecision, RetrievalResult
+
+            return RetrievalResult(
+                chunks=[],
+                decision=GateDecision(relevant=False, reason="no context"),
+                query=query,
+            )
+
+    def test_concurrent_voice_turns_do_not_interleave(self):
+        from anita.answer_engine import AnswerEngine
+        from anita.voice_pipeline import install, run_rag_query_sync
+
+        store = _store()
+        recorder = TurnRecorder(store, ReplayQueue(capacity=100))
+        orchestrator = Orchestrator(
+            ConversationRegistry(store=store, recorder=recorder))
+        install(orchestrator, AnswerEngine(retriever=self._Retriever()))
+
+        def speak(n: int) -> None:
+            run_rag_query_sync(
+                "", "voice", f"question {n}",
+                session_key="+919820055555", caller="+919820055555",
+            )
+
+        threads = [threading.Thread(target=speak, args=(n,)) for n in range(6)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        conversation = orchestrator.registry.get("+919820055555")
+        turns = store.page_turns(conversation.conversation_id)
+        assert [turn.role for turn in turns] == ["user", "assistant"] * 6, (
+            "a voice turn answered outside the conversation's slot interleaves"
+        )
+
+    def test_the_voice_turn_goes_through_submit_turn(self):
+        """The mechanism, not just the effect: the pipeline must ask the queue
+        for the slot rather than calling `begin_turn` on its own."""
+        from anita.answer_engine import AnswerEngine
+        from anita.voice_pipeline import install, run_rag_query_sync
+
+        store = _store()
+        orchestrator = Orchestrator(ConversationRegistry(store=store))
+        submitted: list[str] = []
+        real_submit = orchestrator.submit_turn
+
+        def spy(conversation_id, work):
+            submitted.append(conversation_id)
+            return real_submit(conversation_id, work)
+
+        orchestrator.submit_turn = spy
+        install(orchestrator, AnswerEngine(retriever=self._Retriever()))
+
+        run_rag_query_sync("", "voice", "hello",
+                           session_key="+919820066666", caller="+919820066666")
+
+        conversation = orchestrator.registry.get("+919820066666")
+        assert submitted == [conversation.conversation_id]
+
+
 # ---------------------------------------------------------------------------
 # The janitor
 # ---------------------------------------------------------------------------
@@ -529,3 +601,73 @@ class TestJanitor:
         assert result["swept"] == 1
         assert result["replayed"] == 1
         assert store.turn_count(conversation.conversation_id) == 2
+
+    def test_a_lost_summary_is_retried_on_the_next_tick(self):
+        """§8.28: `unsummarised_closed` existed to find these and had no
+        caller, so a summary lost to a transient store failure stayed lost."""
+        store = _store()
+        registry = ConversationRegistry(idle_window_seconds=0.001, store=store)
+        orchestrator = Orchestrator(registry)
+        conversation, _ = orchestrator.begin_turn(
+            _Env(channel=Channel.WEB_CHAT, text="hi", session_id="s-retry"))
+
+        original = store.write_summary
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("database is locked")
+
+        store.write_summary = boom  # type: ignore[method-assign]
+        time.sleep(0.01)
+        ConversationJanitor(orchestrator=orchestrator).run_once()  # summary lost
+        assert store.unsummarised_closed() == [conversation.conversation_id]
+
+        store.write_summary = original  # type: ignore[method-assign]
+        result = ConversationJanitor(orchestrator=orchestrator).run_once()
+
+        assert result["resummarised"] == 1
+        assert store.unsummarised_closed() == []
+
+    def test_retention_expires_a_transcript_and_keeps_the_row(self):
+        """`DG-11`: `expire_transcript` had no caller, so the review's
+        `expired` state was unreachable in production."""
+        store = _store()
+        recorder = TurnRecorder(store, ReplayQueue(capacity=10))
+        registry = ConversationRegistry(store=store, recorder=recorder)
+        orchestrator = Orchestrator(registry)
+        conversation, _ = orchestrator.begin_turn(
+            _Env(channel=Channel.WEB_CHAT, text="hi", session_id="s-exp"))
+        recorder.record(_turn(conversation.conversation_id, text="hi"))
+
+        store._connection.execute(  # noqa: SLF001 - age the conversation
+            "UPDATE conversation SET last_activity_at = ? WHERE id = ?",
+            ((NOW - timedelta(days=120)).isoformat(), conversation.conversation_id),
+        )
+        result = ConversationJanitor(
+            orchestrator=orchestrator, retention_days=90
+        ).run_once()
+
+        assert result["expired"] == 1
+        assert store.turn_count(conversation.conversation_id) == 0
+        # The row survives, so the review can say the transcript expired *with
+        # its date* rather than showing a conversation that looks empty.
+        assert store.get_conversation(conversation.conversation_id) is not None
+        assert store.transcript_state(conversation.conversation_id) == "expired"
+
+    def test_retention_is_off_when_no_window_is_configured(self):
+        """A deployment that has not decided a window keeps everything."""
+        store = _store()
+        recorder = TurnRecorder(store, ReplayQueue(capacity=10))
+        registry = ConversationRegistry(store=store, recorder=recorder)
+        orchestrator = Orchestrator(registry)
+        conversation, _ = orchestrator.begin_turn(
+            _Env(channel=Channel.WEB_CHAT, text="hi", session_id="s-off"))
+        recorder.record(_turn(conversation.conversation_id, text="hi"))
+
+        store._connection.execute(  # noqa: SLF001
+            "UPDATE conversation SET last_activity_at = ? WHERE id = ?",
+            ((NOW - timedelta(days=3650)).isoformat(), conversation.conversation_id),
+        )
+        result = ConversationJanitor(orchestrator=orchestrator).run_once()
+
+        assert result["expired"] == 0
+        assert store.turn_count(conversation.conversation_id) > 0

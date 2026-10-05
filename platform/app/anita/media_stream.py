@@ -40,8 +40,10 @@ logger = logging.getLogger("anita.media_stream")
 # for no useful resolution.
 MARK_EVERY_N_FRAMES = 25
 
-# Twilio's own frame size for media streams: 8 kHz µ-law, 20 ms.
-FRAME_BYTES = 160
+# Twilio's frame size (8 kHz µ-law, 20 ms ⇒ 160 bytes) is deliberately *not* a
+# constant here: the relay forwards each payload as it arrives and never slices
+# or pads, so a frame-size constant would only be read by tests — the `FRAME_BYTES`
+# that sat here had no caller (§8.12).
 
 
 class MediaStreamError(RuntimeError):

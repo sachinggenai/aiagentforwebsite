@@ -483,6 +483,64 @@ class TestCombinedValidation:
         assert result["total"] == 68
         assert result["browser"]["total"] == 25
 
+    def test_uncited_answers_refuse_promotion(self):
+        """§8.24 — the provenance counts used to be printed and dropped. A
+        grounded answer with no citation is a composition defect (`US-012`
+        `TAC-1`), and a defect that cannot refuse a release is documentation."""
+        from anita.observability import combine_validation
+
+        result = combine_validation(
+            self._gate(True), self._browser(True), self._system(True),
+            citations={"grounded": 55, "uncited": 2, "incomplete": 0},
+        )
+        assert result["passed"] is False
+        assert "citation integrity failed" in result["reason"]
+        assert result["citations"]["uncited"] == 2
+
+    def test_incomplete_citations_refuse_promotion(self):
+        from anita.observability import combine_validation
+
+        result = combine_validation(
+            self._gate(True), self._browser(True), self._system(True),
+            citations={"grounded": 55, "uncited": 0, "incomplete": 1},
+        )
+        assert result["passed"] is False
+        assert "1 incomplete" in result["reason"]
+
+    def test_a_broken_citation_run_refuses_promotion(self):
+        """"The check did not complete" must not read as "the check passed"."""
+        from anita.observability import combine_validation
+
+        result = combine_validation(
+            self._gate(True), self._browser(True), self._system(True),
+            citations={"grounded": 0, "uncited": 0, "incomplete": 0,
+                       "error": "TimeoutError: ollama"},
+        )
+        assert result["passed"] is False
+        assert "did not complete" in result["reason"]
+
+    def test_clean_citations_do_not_block(self):
+        from anita.observability import combine_validation
+
+        result = combine_validation(
+            self._gate(True), self._browser(True), self._system(True),
+            citations={"grounded": 55, "uncited": 0, "incomplete": 0},
+        )
+        assert result["passed"] is True
+        assert result["citations"]["grounded"] == 55
+
+    def test_citations_travel_with_an_unrun_suite(self):
+        """The early return (no browser) must still carry the counts, or the
+        report loses the very check that was run."""
+        from anita.observability import combine_validation
+
+        result = combine_validation(
+            self._gate(True), None, self._system(True),
+            citations={"grounded": 55, "uncited": 0, "incomplete": 0},
+        )
+        assert result["passed"] is False
+        assert result["citations"]["grounded"] == 55
+
     def test_the_live_index_refuses_a_failed_combined_validation(self):
         """The enforcement point itself, exercised with the real dict shape."""
         from anita.index import IndexLifecycle

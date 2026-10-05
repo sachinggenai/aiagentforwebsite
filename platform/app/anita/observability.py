@@ -649,6 +649,8 @@ def combine_validation(
     gate: "GateReport",
     browser: BrowserReport | None,
     system: SystemReport | None = None,
+    *,
+    citations: dict | None = None,
 ) -> dict:
     """One promotion decision, from both evidence sources.
 
@@ -672,6 +674,7 @@ def combine_validation(
         name for name, report in (("browser", browser), ("system", system))
         if report is None
     ]
+    citation_failure = _citation_failure(citations)
     if missing:
         return {
             **gate.as_dict(),
@@ -682,9 +685,13 @@ def combine_validation(
             ),
             "browser": browser.as_dict() if browser else None,
             "system": system.as_dict() if system else None,
+            "citations": citations,
         }
 
-    passed = bool(gate.passed) and bool(browser.passed) and bool(system.passed)
+    passed = (
+        bool(gate.passed) and bool(browser.passed) and bool(system.passed)
+        and citation_failure is None
+    )
     if not gate.passed:
         reason = gate.reason or "evaluation set failed"
     elif not browser.passed:
@@ -699,6 +706,8 @@ def combine_validation(
         # Named, not counted: "6 use cases unreachable" tells an operator to go
         # and look. "system check failed" does not.
         reason = f"system check failed: {', '.join(system.broken[:8])}"
+    elif citation_failure:
+        reason = citation_failure
     else:
         reason = (
             f"all {gate.total} cases, {browser.total} scenarios and "
@@ -711,7 +720,31 @@ def combine_validation(
         "reason": reason,
         "browser": browser.as_dict(),
         "system": system.as_dict(),
+        "citations": citations,
     }
+
+
+def _citation_failure(citations: dict | None) -> str | None:
+    """Why the citation counts block promotion, or `None` when they do not.
+
+    US-012 `TAC-1`/`TAC-2`: a grounded answer with no citation, or a citation
+    that could not be completed, is a composition defect. The gate used to
+    compute and print these counts and then drop them before the verdict
+    (`§8.24`) — visible in a log, unable to refuse anything. A count that
+    cannot fail a release is documentation, not a check.
+    """
+    if not citations:
+        return None
+    if citations.get("error"):
+        return f"citation check did not complete — {citations['error']}"
+    uncited = int(citations.get("uncited") or 0)
+    incomplete = int(citations.get("incomplete") or 0)
+    if uncited or incomplete:
+        return (
+            f"citation integrity failed: {uncited} uncited, {incomplete} incomplete "
+            f"of {int(citations.get('grounded') or 0)} grounded answers"
+        )
+    return None
 
 
 def _routing_cases(corpus) -> list[EvalCase]:

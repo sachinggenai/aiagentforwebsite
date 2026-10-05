@@ -41,6 +41,7 @@ from anita.messaging import (  # noqa: E402
     classify_content,
 )
 from anita.outbox import (  # noqa: E402
+    BACKOFF_CEILING_SECONDS,
     BACKOFF_SECONDS,
     FAILED,
     MAX_ATTEMPTS,
@@ -60,13 +61,24 @@ NOW = datetime(2026, 10, 4, 12, 0, 0, tzinfo=timezone.utc)
 # The outbox
 # ---------------------------------------------------------------------------
 class TestBackoff:
+    """§8.26: the schedule is the *waits*, and the budget is the attempts.
+
+    Five attempts means four waits. The old code kept five values and derived
+    the budget from their length, so the 15-minute rung was scheduled by
+    nothing — the row was failed at attempt 5 before it could be used."""
+
     def test_the_documented_schedule(self):
-        assert [backoff(n).total_seconds() for n in range(1, 6)] == [5, 30, 120, 480, 900]
+        assert [backoff(n).total_seconds() for n in range(1, 5)] == [5, 30, 120, 480]
 
-    def test_the_budget_is_the_schedule(self):
-        assert MAX_ATTEMPTS == len(BACKOFF_SECONDS) == 5
+    def test_the_budget_is_the_sends(self):
+        assert MAX_ATTEMPTS == len(BACKOFF_SECONDS) + 1 == 5
 
-    def test_past_the_end_the_last_value_is_held(self):
+    def test_the_ceiling_is_defined_and_never_scheduled(self):
+        """A caller asking about attempt 5 gets the documented 15-minute
+        ceiling rather than an IndexError; `mark_retry` fails the row instead
+        of scheduling it, which the retry test below asserts end to end."""
+        assert BACKOFF_CEILING_SECONDS == 900
+        assert backoff(5) == timedelta(seconds=900)
         assert backoff(9) == timedelta(seconds=900)
 
 
@@ -445,6 +457,28 @@ class TestAdapterRegistry:
             registry.enable("acme_portal")
         assert registry.get("acme_portal") is None
         assert registry.enabled() == []
+
+    def test_the_boot_probe_refuses_a_channel_with_no_credential(self):
+        """§8.27: the probe `assembly` wires answers the one question a
+        provider-neutral boot can answer — is the credential the adapter
+        authenticates with actually present?"""
+        from anita.extra_channel import credential_probe
+
+        registry = AdapterRegistry(probe=credential_probe({}))
+        registry.declare(_config(secret_env="ANITA_ACME_SECRET"))
+        with pytest.raises(AdapterUnreachable) as excinfo:
+            registry.enable("acme_portal")
+        assert "ANITA_ACME_SECRET" in str(excinfo.value)
+        assert registry.enabled() == []
+
+    def test_the_boot_probe_admits_a_channel_whose_credential_is_set(self):
+        from anita.extra_channel import credential_probe
+
+        registry = AdapterRegistry(
+            probe=credential_probe({"ANITA_ACME_SECRET": "s3cret"})
+        )
+        registry.declare(_config(secret_env="ANITA_ACME_SECRET"))
+        assert registry.enable("acme_portal").enabled
 
     def test_disabling_retains_the_declaration_for_re_enable(self):
         registry = AdapterRegistry()

@@ -136,7 +136,6 @@ from .answer_engine import (  # noqa: F401
     DECLINE_TEXT_NO_OFFER,
     HELP_TEXT,
     LEAD_CAPTURED_TEXT,
-    OFFLINE_TEXT,
     OFFER_PHRASE,
     README_SERVICE_UNAVAILABLE,
     AnswerEngine,
@@ -497,7 +496,7 @@ class AdminSurface:
     """
 
     def __init__(self, *, registry=None, gateway=None, admission=None,
-                 metrics=None, gate=None, traces=None, crm=None, outbox=None,
+                 metrics=None, gate=None, crm=None, outbox=None,
                  store=None) -> None:
         self.registry = registry
         self.gateway = gateway
@@ -517,7 +516,9 @@ class AdminSurface:
         self.admission = admission
         self.metrics = metrics
         self.gate = gate
-        self.traces = traces
+        # A `traces` writer used to be stored here and never read (§8.28).
+        # Exposing per-turn traces on the admin API is a real gap in US-026 —
+        # it just is not closed by holding a reference nobody uses.
 
     # -- health ------------------------------------------------------------
     def channels(self) -> Response:

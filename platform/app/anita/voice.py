@@ -2060,7 +2060,11 @@ class VoiceCallSession:
             # says which of the two it was.
             REGISTRY.note_failed()
             return []
-        REGISTRY.note_asset_played(FIXED_RESPONSE_ASSET, call_sid=self.call_id)
+        # The outcome axis is aggregate: `note_asset_played` counts *that* a
+        # canned response was played, and takes no argument. Passing the asset
+        # path and call id raised a TypeError the moment that branch was first
+        # reached (§8.10) — unobservable only because no asset is configured.
+        REGISTRY.note_asset_played()
         self.log_event("FIXED_RESPONSE", reason=reason, chunks=len(chunks))
         if self._trace is not None:
             # A degraded turn is its own outcome. It is not a failure: the

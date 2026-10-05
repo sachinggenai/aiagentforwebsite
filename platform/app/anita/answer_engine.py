@@ -106,10 +106,6 @@ CLINICAL_TEXT = (
     "I can help with product and order questions, but I can't give medical "
     "advice. Please speak to a clinician for that."
 )
-OFFLINE_TEXT = (
-    "I'm having trouble reaching our system right now. "
-    "Please try again shortly, or call us directly."
-)
 README_SERVICE_UNAVAILABLE = "unavailable"
 
 # Used when no lead service is wired. Identical to DECLINE_TEXT minus the offer

@@ -97,6 +97,36 @@ def validate_config(config: ExtraChannelConfig) -> None:
         )
 
 
+def credential_probe(env):
+    """The probe the registry runs before enabling a channel.
+
+    A provider-neutral probe is possible because every adapter shares exactly
+    one precondition: the HMAC secret its `secret_env` names must exist. A
+    reachability check would need the provider's own API, which this module
+    deliberately does not know — so the probe answers the question it *can*
+    answer, and a provider that is up but hostile still fails at the first send,
+    where the outbox retries it and surfaces it (`CG-4`).
+
+    The fifth pass recorded that `assembly` built the registry with no probe at
+    all (`§8.27`), which left this leg dead in every shipped deployment — a
+    "declares → validates → **probes** → enables" sequence that skipped its
+    third step.
+    """
+    def probe(config: ExtraChannelConfig) -> None:
+        name = str(config.secret_env or "").strip()
+        if not name:
+            raise AdapterConfigInvalid("secret_env", "is required to enable this adapter")
+        if not str(env.get(name, "") or "").strip():
+            # Raise the registry's own unreachable type: from the operator's
+            # side this is "the channel cannot be reached", and the detail
+            # names the credential rather than leaking its value.
+            raise AdapterUnreachable(
+                f"{name} is unset — the adapter cannot authenticate its provider"
+            )
+
+    return probe
+
+
 def validate_hmac(secret: str, body: bytes, header: str | None) -> None:
     """Verify an extra-channel webhook signature over the raw body.
 

@@ -421,25 +421,6 @@ class TestCrmSeam:
         swapped.capture("+91 98000 00000")
         assert recorded, "the service must go through the interface"
 
-    def test_outbox_retries_with_backoff(self, store):
-        """REC-07: a CRM outage degrades to a delay, not a lost lead."""
-        outbox_id = store.enqueue("push_lead", {"lead_id": "l1"})
-        store.mark_failed(outbox_id, "connection refused", delay_seconds=0)
-        pending = store.pending_outbox()
-        assert pending and pending[0]["attempts"] == 1
-
-    def test_outbox_gives_up_after_ten_attempts(self, store):
-        outbox_id = store.enqueue("push_lead", {"lead_id": "l1"})
-        for _ in range(10):
-            store.mark_failed(outbox_id, "still down", delay_seconds=0)
-        assert store.pending_outbox() == []
-
-    def test_a_sent_operation_leaves_the_outbox(self, store):
-        outbox_id = store.enqueue("push_lead", {"lead_id": "l1"})
-        store.mark_sent(outbox_id)
-        assert store.pending_outbox() == []
-
-
 # ---------------------------------------------------------------------------
 # A product question is not a contact detail
 #

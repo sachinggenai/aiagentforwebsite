@@ -239,6 +239,41 @@ class TestAdapters:
         assert isinstance(device, str) and device
         assert isinstance(compute_type, str) and compute_type
 
+    def test_the_cuda12_registration_is_a_no_op_without_the_wheels(self):
+        """A CPU-only or chat-only deployment installs no `nvidia-*` wheel, and
+        the registration must not raise there — it is a GPU convenience, not a
+        boot requirement."""
+        import sys as _sys
+
+        from anita import voice_platform
+
+        saved = _sys.modules.get("nvidia")
+        _sys.modules["nvidia"] = None          # makes `import nvidia` raise ImportError
+        try:
+            assert voice_platform.ensure_ctranslate2_cuda_libs() == []
+        finally:
+            if saved is None:
+                _sys.modules.pop("nvidia", None)
+            else:
+                _sys.modules["nvidia"] = saved
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="a Windows DLL-path arrangement")
+    def test_it_registers_the_cublas_bin_directory(self, tmp_path, monkeypatch):
+        """CTranslate2 wants CUDA 12's cuBLAS while torch ships CUDA 13; the
+        fix is to install both and register the 12 — this asserts the
+        registration finds the directory the wheel actually ships."""
+        import types
+
+        from anita import voice_platform
+
+        bin_dir = tmp_path / "cublas" / "bin"
+        bin_dir.mkdir(parents=True)
+        fake = types.ModuleType("nvidia")
+        fake.__path__ = [str(tmp_path)]  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "nvidia", fake)
+
+        assert str(bin_dir) in voice_platform.ensure_ctranslate2_cuda_libs()
+
     def test_load_call_asset_tolerates_a_missing_asset(self):
         """ANITA ships no bundled audio, so asset_path returns None.
 

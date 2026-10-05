@@ -24,6 +24,18 @@ from pathlib import Path
 PLATFORM = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLATFORM / "app"))
 
+# The model-stage header contains an arrow and the transcripts contain whatever
+# the caller said. On a console whose codepage is not UTF-8 (cp1252 on this
+# Windows box) `print` raises UnicodeEncodeError and kills the harness before
+# it loads a single model — which is how the first GPU verification run died,
+# looking like a model failure when it was a `print`. Same guard as
+# `rebuild_index.py` and `carrier_acceptance.py`.
+for stream in (sys.stdout, sys.stderr):
+    try:
+        stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 PASS, FAIL, SKIP, INFO = "PASS", "FAIL", "SKIP", "INFO"
 
 
@@ -156,18 +168,34 @@ def run_model_stages() -> bool:
         report(SKIP, "TTS model", f"not available locally ({type(exc).__name__}: {str(exc)[:60]})")
         return False
 
+    # The device the *product* would use, not a hardcoded CPU. It was pinned to
+    # "cpu" here, so this harness reported a green STT on a GPU box while the
+    # live path was failing at the first transcription with "cublas64_12.dll is
+    # not found" — the check agreed with the wrong thing (work-status §9).
+    from anita.voice_platform import ensure_ctranslate2_cuda_libs, get_whisper_device_config
+
+    device, compute_type = get_whisper_device_config()
+    if device == "cuda":
+        ensure_ctranslate2_cuda_libs()
+
     started = time.monotonic()
     try:
-        stt = WhisperModel(settings.WHISPER_MODEL, device="cpu", compute_type="int8")
+        stt = WhisperModel(settings.WHISPER_MODEL, device=device,
+                           compute_type=compute_type)
         segments, _ = stt.transcribe(samples.astype("float32"), language="en", beam_size=1)
         transcript = " ".join(segment.text for segment in segments).strip()
-        report(PASS, "STT", f"{time.monotonic() - started:.2f}s -> {transcript[:66]!r}")
+        # The device is named, not implied: "the model loaded" and "the model
+        # ran where you think it did" are different claims.
+        report(PASS, "STT", f"{time.monotonic() - started:.2f}s on {device}/{compute_type} "
+                            f"-> {transcript[:60]!r}")
         # A round trip that loses the price is worse than no round trip.
         ok = "sixty" in transcript.lower() or "60" in transcript
         report(PASS if ok else FAIL, "round trip preserved the figure")
         return ok
     except Exception as exc:  # noqa: BLE001
-        report(SKIP, "STT model", f"not available locally ({type(exc).__name__}: {str(exc)[:60]})")
+        # A failure on the configured device is a FAIL, not a SKIP: skipping it
+        # is how a GPU box with a broken CUDA link reported green.
+        report(FAIL, "STT model", f"{device}/{compute_type} ({type(exc).__name__}: {str(exc)[:60]})")
         return False
 
 

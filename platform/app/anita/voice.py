@@ -74,6 +74,25 @@ def _get_stt_model():
         device = "cuda" if settings.CUDA_VISIBLE_DEVICES else "cpu"
         compute_type = "int8" if device == "cuda" else "float32"
 
+    # CTranslate2 links CUDA 12's cuBLAS while torch (cu130) ships CUDA 13, and
+    # importing torch makes CTranslate2 skip its own DLL loading — so on a GPU
+    # box the model loads, logs "ready on cuda", and then dies on the first
+    # transcription with "cublas64_12.dll is not found". Register the CUDA 12
+    # libraries (from `nvidia-cublas-cu12`) before the model is built, so ORT
+    # keeps torch's CUDA 13 and CTranslate2 gets the 12 it was built for.
+    if device == "cuda":
+        try:
+            from .voice_platform import ensure_ctranslate2_cuda_libs
+            registered = ensure_ctranslate2_cuda_libs()
+            if not registered:
+                logger.warning(
+                    "CTranslate2 wants cublas64_12.dll and no CUDA 12 library is "
+                    "registered — install it with: "
+                    ".venv/Scripts/python.exe -m pip install nvidia-cublas-cu12"
+                )
+        except Exception as exc:  # noqa: BLE001 - never block the load
+            logger.warning("CUDA 12 library registration skipped (%s)", exc)
+
     logger.info(f"Loading faster-whisper {_STT_MODEL_SIZE} on {device} ({compute_type})...")
     # WHISPER_NUM_THREADS is sized per machine by scripts/predeploy.py.
     # Note: pipecat's WhisperSTTSettings has no cpu_threads param, so this

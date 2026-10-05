@@ -53,5 +53,48 @@ audioop-lts>=0.2; python_version >= "3.13"
 # where something else had already pulled it in.
 scipy>=1.11
 
+# --- GPU (optional) -------------------------------------------------------
+# torch is deliberately NOT a hard requirement: it is ~2 GB, and a chat-only
+# deployment runs fine without it (`platform_detect._cuda_available()` degrades
+# to a cheap nvidia-smi check and reports "nvidia-smi present but torch is not
+# installed" rather than silently pretending to have a GPU).
+#
+# Install it on a box with an NVIDIA GPU, and the deployment changes shape:
+#   * `voice_capable` becomes true — the CPU-only cap of 1 concurrent call
+#     (`CPU_CONCURRENT_CALLS`) is lifted and the US-018 VRAM ladder's monitor
+#     starts sampling (there is nothing to shed without a device it believes in)
+#   * `detect_platform()` selects `cuda` for faster-whisper (CTranslate2, int8)
+#   * `voice._get_tts_engine()` preloads torch's bundled CUDA + cuDNN DLLs so
+#     ONNX Runtime's CUDA provider can instantiate. Measured on this box:
+#     Kokoro synthesis RTF 0.63 on CPU → 0.06 with the provider live.
+#
+# The CUDA build must match what ONNX Runtime asks for. As of 2026-10-04 the ORT
+# wheel requires cuDNN 9 + **CUDA 13**, so install from the cu130 index:
+#
+#   .venv\Scripts\python -m pip install torch \
+#       --index-url https://download.pytorch.org/whl/cu130
+#
+# Installing the default PyPI wheel instead gets a CPU-only build: the bits
+# import, `torch.cuda.is_available()` is false, and every symptom above stays.
+#
+# `onnxruntime-gpu` is the other half of the TTS leg — the plain `onnxruntime`
+# wheel lists no `CUDAExecutionProvider`, so the session silently lands on CPU
+# however good the torch install is:
+#
+#   .venv\Scripts\python -m pip install onnxruntime-gpu==1.30.0
+#
+# --- and the speech stack wants a SECOND CUDA major ------------------------
+# CTranslate2 (faster-whisper) is built against **CUDA 12** and loads
+# `cublas64_12.dll`, which a cu130 torch does not ship. It fails late and
+# quietly: the model constructs, `ready on cuda` is logged, and the
+# `RuntimeError` only fires on the first transcription. Install CUDA 12's
+# cuBLAS *alongside* torch — `voice_platform.ensure_ctranslate2_cuda_libs()`
+# registers it (both via `os.add_dll_directory` and on PATH; only PATH actually
+# reaches CTranslate2's C++ loader — measured):
+#
+#   .venv\Scripts\python -m pip install nvidia-cublas-cu12
+#
+# Result on this box: STT RTF 0.002 and TTS RTF 0.084, both on the GPU.
+
 # --- Dev / test ---
 pytest>=8.0,<9.0

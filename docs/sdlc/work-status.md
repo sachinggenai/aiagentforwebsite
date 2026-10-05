@@ -166,7 +166,7 @@ not a claim that the product is launch-ready; §6 of this file covers what is ac
 |---|---|---|
 | US-016 STT: 20 ms frames, VAD, 600 ms floor | `COMPLETED` | **Promoted from `IN PROGRESS`.** The media-stream relay reaches the real STT leg — the accurate chain is `media_stream.py:218` (`feed_audio`) → `:219` (`_begin_turn`) → `:245` (`process_utterance`) → `voice.py:1278` (`_transcribe`); the fifth-pass citations (`media_stream.py:194`, `voice.py:1157`) point at the echo/muted return and the silence-threshold condition, not the call chain — and the simulated call transcribed `"How much is the ultrasound gel?"` with faster-whisper on CPU. Noted: `speech.EndOfSpeechTracker` is a parallel implementation the live engine does not use (`voice.py` counts silence itself); it survives only in tests and the diagnostic `scripts/voice_e2e.py`. The fixed-response refusal path is silent only while no asset is configured; the `note_asset_played` arity defect that would have raised the moment one was is fixed (§8.10, Batch 7), so the branch records a *degraded* outcome rather than a failed one when it runs |
 | US-017 Clause TTS with immediate barge-in stop | `COMPLETED` | **Done 2026-10-04.** Clause TTS was live; barge-in was not. Now: the clause loop checks the cancel signal **per clause** and stops before the next one — raising the engine's own `GenerationCancelled`, so the tail is not flushed either; `_synthesise_streamed` and the TTS producer generator stop mid-clause on the same signal, and a partial is never cached; the relay sends Twilio `clear` on the **transition** into an interruption only (echo and muted frames do not; the caller's continuing speech does not re-signal), so the buffered audio actually stops; and the transcript marks the answer truncated — `note_answer_truncated()` finally has a caller, and is a no-op on the streamed path where the history already holds only what was heard. **AC-4** is implemented with it: a clause that fails to synthesise is retried once, then the human-transfer offer is spoken rather than silence. **Evidence:** `pytest tests -q` → **917 passed** (15 new); the audit's reproduction — interrupt after clause 1 and all clauses are still spoken — is now the test that fails without the fix. **Residuals:** AC-1's ≤300 ms first-audio and AC-2's ≤150 ms stop-to-silence budgets are engine-side only until the real carrier call (Batch 3) — the trace now carries the data to measure them; the `clear` round trip to Twilio is unmeasured |
-| US-018 VRAM admission, degrade voice before text | `COMPLETED` | **Done 2026-10-04.** Three gaps closed: (1) **the ladder now moves** — `anita/capacity.py` samples device free memory (nvidia-smi; `None` means *not measurable* and the policy then does nothing rather than guessing), publishes `gpu_free_mib` to the metrics registry (previously registered unavailable and never written), and walks the ladder down when the **sibling's floor** is threatened and back up only with headroom (`HYSTERESIS_MIB=512`, so a box at the threshold does not flap). Order is the story's: `voice_shed → stt_off → tts_off → chat_degrade → commercial_only`, and a shed rung refuses the next call while text stays available. (2) **The configured capacity numbers reach the controller** — `vram.anita_budget_mib` / `shared_card_mib` / `sibling_floor_mib` were read by nothing and the controller ran on dataclass defaults; now they are passed (TAC-7's "an unread capacity key is decoration"). (3) **The boot claim is true** — a host without a CUDA device is **capped at 1 concurrent call** (`CPU_CONCURRENT_CALLS`; CPU synthesis is ~0.6× real time), not "refused at admission" as the report used to claim with no code behind it; voice still works, which the simulated call proved. **Note (housekeeping pass):** on *this* machine the cap is not the hardware's fault — there is a 16 GB RTX 5060 Ti, and `voice_capable` is false only because `torch` is not installed, so the cap and the absent VRAM monitor are both dependency effects (see §9 housekeeping). The monitor is started only where there is a device to read — on CPU there is no VRAM to shed, and a monitor would be theatre. **Evidence:** `pytest tests -q` → **938 passed** (11 new: the ladder order, voice-first shedding, refusal on a shed rung, recovery with hysteresis, unmeasurable-is-not-pressure, metric publishing, config-to-controller, the CPU cap, and boot-report-matches-behaviour). **Residuals:** the sampler's 5 s cadence and the 30-minute soak (TAC-2) need a GPU host — no CUDA device exists on this machine, so the pressure path is proven with a forced source, not with real memory pressure; the capacity trace (TAC-5's "visible in the trace") is the `gpu_free_mib` metric plus the logger, not a durable capacity-events table |
+| US-018 VRAM admission, degrade voice before text | `COMPLETED` | **Done 2026-10-04.** Three gaps closed: (1) **the ladder now moves** — `anita/capacity.py` samples device free memory (nvidia-smi; `None` means *not measurable* and the policy then does nothing rather than guessing), publishes `gpu_free_mib` to the metrics registry (previously registered unavailable and never written), and walks the ladder down when the **sibling's floor** is threatened and back up only with headroom (`HYSTERESIS_MIB=512`, so a box at the threshold does not flap). Order is the story's: `voice_shed → stt_off → tts_off → chat_degrade → commercial_only`, and a shed rung refuses the next call while text stays available. (2) **The configured capacity numbers reach the controller** — `vram.anita_budget_mib` / `shared_card_mib` / `sibling_floor_mib` were read by nothing and the controller ran on dataclass defaults; now they are passed (TAC-7's "an unread capacity key is decoration"). (3) **The boot claim is true** — a host without a CUDA device is **capped at 1 concurrent call** (`CPU_CONCURRENT_CALLS`; CPU synthesis is ~0.6× real time), not "refused at admission" as the report used to claim with no code behind it; voice still works, which the simulated call proved. **Update 2026-10-04:** the cap was a dependency artefact on this box, not a hardware fact — with CUDA torch installed the host is `voice_capable`, the ceiling is the configured **2**, and the ladder's monitor now samples a real device (§9, "The GPU, enabled 2026-10-04"). The monitor is started only where there is a device to read — on CPU there is no VRAM to shed, and a monitor would be theatre. **Evidence:** `pytest tests -q` → **938 passed** (11 new: the ladder order, voice-first shedding, refusal on a shed rung, recovery with hysteresis, unmeasurable-is-not-pressure, metric publishing, config-to-controller, the CPU cap, and boot-report-matches-behaviour). **Residuals:** the sampler's 5 s cadence and the 30-minute soak (TAC-2) need a GPU host — no CUDA device exists on this machine, so the pressure path is proven with a forced source, not with real memory pressure; the capacity trace (TAC-5's "visible in the trace") is the `gpu_free_mib` metric plus the logger, not a durable capacity-events table |
 
 ### MOD-06 Lead & Mock CRM
 
@@ -586,13 +586,13 @@ stand) and the live-Ollama prose check (a model download/CPU-bound run).
 
 | Check | Command | Result |
 |---|---|---|
-| Unit suite — **re-run** | `platform/.venv/Scripts/python -m pytest tests -q` | **1161 passed**, 1 skipped, 0 failed — 1132 at the sixth pass, +5 staging collection (§8.23), +11 WS admission (§8.6), +8 Batch 7, +5 for the config audit (§8.29) |
+| Unit suite — **re-run** | `platform/.venv/Scripts/python -m pytest tests -q` | **1163 passed**, 1 skipped, 0 failed — 1132 at the sixth pass, +5 staging collection (§8.23), +11 WS admission (§8.6), +8 Batch 7, +5 config audit (§8.29), +2 CUDA-12 registration |
 | Config audit — **re-run** | `anita.boot.preflight()` → AUDIT phase | **43 keys live · 5 pending**, and the five are `DATABASE_URL` + `DB_*` — CR-02's keys, which really have no code. Before §8.29 the bucket held 12 and called built modules unbuilt |
 | Carrier-free acceptance (US-001) — **added** | `platform/.venv/Scripts/python scripts/carrier_acceptance.py` | Drives Twilio's half of `T-01/T-05/T-06/T-12/T-13/T-16` over the public tunnel and prints the handset checklist. `--check` verifies preconditions only; run against a live tunnel + instance |
 | System integrity — **re-run** | `platform/.venv/Scripts/python scripts/system_check.py` | **20 passed · 0 failed · 0 warnings · 1 deferred** — 49 modules import, 47/49 reachable; UC-02/UC-03/UC-04 *driven*; UC-14 `NOT CONFIGURED`; UC-09 deferred |
 | Evaluation set — **re-run** | `platform/.venv/Scripts/python scripts/release_gate.py --no-browser` | **70 / 70 cases passed** — from the **frozen** set, sha256 `eb2ffc27…` (re-computed: matches the pin in `config/anita.yaml`) |
 | Citation integrity (US-012) — **re-run** | `scripts/release_gate.py` section 1 | **55 grounded answers, 0 uncited, 0 incomplete** |
-| Boot preflight — **re-run** | `anita.boot.preflight()` | **OK** — config loaded, 36 keys live, isolation green; the deployed assembly reported three *degradations* at the time of the run (CPU host capped at 1 call · SMTP unconfigured · `ANITA_SESSION_SECRET` unset), none of which are failures — `ANITA_SESSION_SECRET` is now set, so the current count is **two** |
+| Boot preflight — **re-run** | `anita.boot.preflight()` | **OK** — config loaded, 36 keys live, isolation green; the deployed assembly reported three *degradations* at the time of the run (CPU host capped at 1 call · SMTP unconfigured · `ANITA_SESSION_SECRET` unset), none of which are failures — `ANITA_SESSION_SECRET` is now set and the GPU is enabled, so the current count is **one** (SMTP) |
 | Voice wiring harness — **re-run** | `platform/.venv/Scripts/python scripts/voice_e2e.py` | all control stages **PASS** (modules, deterministic price, VAD end-of-speech, capacity refusal, voice-sheds-first); model stages need `--models` |
 | Browser suite (buyer chat, Streamlit) | `bash tests/e2e/run.sh` | *carried*: **50 passed** (25 scenarios × desktop + mobile) — on a frozen tree, fresh instance |
 | Browser suite (browser voice, FastAPI page) | `bash tests/e2e/run_voice.sh` | *carried*: **4 passed** (2 voice scenarios × desktop + mobile) |
@@ -780,6 +780,44 @@ a running instance · the evidence line recorded here · the UC deferral removed
 | CR-02 Postgres + Docker | Q9–Q12 (§5) |
 | U-1 / U-2 / U-3 | Open product questions (§6) |
 
+#### The GPU, enabled 2026-10-04
+
+`torch 2.14.1+cu130` was installed, and the box went from *believing* it was a CPU host to using the
+card. Verified rather than assumed — the numbers below are measured, and two of them initially said
+the opposite:
+
+| Check | Before | After |
+|---|---|---|
+| `detect_platform()` | `cpu` / float32 | **`cuda` / int8 / 15.9 GB / nvidia** |
+| CUDA capability | — | **sm_120** (Blackwell; a build without those kernels would have failed at the first launch) |
+| Effective call ceiling | 1 (`CPU_CONCURRENT_CALLS`) | **2** (the configured value) |
+| US-018 VRAM monitor | never started | runs (nvidia-smi sampling) |
+| Kokoro TTS | CPU, RTF 0.63 | **CUDA provider live, RTF 0.084** (~7.5×) |
+| faster-whisper STT | CPU | **cuda/int8, RTF 0.002** |
+| Boot degradations | 3 | **1** (SMTP only) |
+
+**Three things had to be true at once, and the code only knew about the first:**
+
+1. `torch` from the **cu130** index — the plain PyPI wheel is a CPU-only build, and ONNX Runtime's
+   CUDA provider wants cuDNN 9 + CUDA 13 (`voice.py` records an earlier attempt that failed here).
+2. **`onnxruntime-gpu`** instead of `onnxruntime`. The CPU wheel lists no `CUDAExecutionProvider`,
+   so the session landed on CPU no matter what torch provided.
+3. **CUDA 12's cuBLAS, alongside** (`nvidia-cublas-cu12`). CTranslate2 is built against CUDA 12 and
+   loads `cublas64_12.dll`; a cu130 torch ships only `_13`. The failure was *late and quiet* — the
+   model constructed and logged `ready on cuda`, then raised `RuntimeError: Library cublas64_12.dll
+   is not found or cannot be loaded` on the first transcription, i.e. on a live call's first
+   utterance. `voice_platform.ensure_ctranslate2_cuda_libs()` now registers that directory, and it
+   had to do so **on `PATH` as well as via `os.add_dll_directory`**: with the directory merely
+   added, ctypes could load the DLL but CTranslate2's own C++ loader still could not (measured).
+
+**Two harness defects surfaced on the way**, both of which had been hiding the third problem:
+`scripts/voice_e2e.py` pinned its STT round trip to `device="cpu"` (so it reported a green STT on a
+box whose live path was broken) and crashed on a `→` under a cp1252 console. It now round-trips on
+the configured device, names it in the output, and treats a failure there as `FAIL` rather than
+`SKIP`.
+
+**`T-17` is unblocked**: the load test is specified against a 2-slot ceiling, which the box now has.
+
 **Deferrals, verified against `config/anita.yaml` on the sixth pass: `UC-09` is the only one.** The
 UC-02/UC-03/UC-04/UC-14 entries were removed when their routes landed; UC-14 is not deferred but
 *unconfigured* (`system_check` reports `NOT CONFIGURED`).
@@ -803,13 +841,9 @@ Still open — and both need something only you have:
   `open` in the admin queue rather than emailing the rep (`GET /api/admin/handoffs` and the
   console's Escalations panel show it either way). Any SMTP credentials will do — this is a value,
   not code.
-- **A GPU that the app is not using.** ⚠ This machine has an **NVIDIA RTX 5060 Ti, 16 GB**, but
-  `platform_detect._cuda_available()` requires `torch` and the dependency is not installed — so
-  `voice_capable` is false, the deployment is capped at **1** concurrent call instead of the
-  configured 2 (`CPU_CONCURRENT_CALLS`), the US-018 VRAM monitor never starts (there is no sampling
-  to do without a device it believes in), and STT/TTS run on CPU at ~0.6× real time. Installing a
-  CUDA build of `torch` changes all four. **This also blocks `T-17`**: the load test is specified
-  against a 2-slot ceiling and cannot be run as written while the effective ceiling is 1.
+- ~~**A GPU that the app is not using.**~~ ✅ **Done 2026-10-04.** This machine has an **NVIDIA
+  RTX 5060 Ti, 16 GB** and was running as a CPU host because `torch` was absent. It now runs on the
+  GPU — see the note below for what that took and what it changed.
 - **§10 — the university-domain cleanup tasks**: all CL-1…CL-11 done; nothing outstanding.
 
 **Commit state:** every code change described in this file is committed — the US-001 build log

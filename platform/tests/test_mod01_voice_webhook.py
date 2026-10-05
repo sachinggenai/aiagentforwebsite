@@ -292,6 +292,36 @@ class TestTwiML:
         assert param.get("value") == call_id
         assert param.get("onload") is None, "no attribute may be smuggled in"
 
+    def test_the_twiml_carries_a_token_when_a_minter_is_installed(self):
+        """§8.6: the media-stream socket is public, so the TwiML must hand the
+        relay the proof that this call was admitted. The token names the call,
+        so a token minted for one call cannot open another's stream."""
+        import xml.etree.ElementTree as ET
+
+        from anita.browser_voice import SessionTokens
+
+        tokens = SessionTokens("test-secret")
+        hook = VoiceWebhook(
+            auth_token=TOKEN, public_base_url=PUBLIC, stream_tokens=tokens
+        )
+        status, body, _ = hook.voice(params=dict(CALL), signature=_signed(CALL))
+        assert status == 200
+
+        params = {
+            p.get("name"): p.get("value")
+            for p in ET.fromstring(body).findall("./Connect/Stream/Parameter")
+        }
+        assert params["call_id"] == "CA1234567890"
+        verified = tokens.verify(params["token"])
+        assert verified.session_id == "CA1234567890"
+
+    def test_no_token_is_emitted_without_a_minter(self):
+        """The webhook stays usable with no signer (tests, tools): no token is
+        written, and the relay that reads the same object requires none."""
+        status, body, _ = _webhook().voice(params=dict(CALL), signature=_signed(CALL))
+        assert status == 200
+        assert "token" not in body
+
     def test_busy_twiml_escapes_the_message(self):
         xml = build_busy_twiml('Sorry <all> "lines" are busy')
         assert "<all>" not in xml

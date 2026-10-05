@@ -184,13 +184,88 @@ Watch the instance terminal. A healthy call shows, in order: `media stream: star
 
 ---
 
-## What is still missing
+## What still needs a real call
 
-Two acceptance criteria are **not** implemented, so a long or difficult call behaves worse than the
-story specifies:
+**TAC-6 and AC-7 are implemented** (they were built in `4fe32b0`; this section used to say
+otherwise). The 30-minute cap closes a silent call and retains the transcript; three unintelligible
+turns end in a human-callback offer and the call closes. What no amount of local testing can
+produce is the carrier's own evidence:
 
-- **TAC-6** — the 30-minute call cap. A call with no successful end-of-speech is not closed
-- **AC-7** — the three-strike path. After three unintelligible utterances the caller should be
-  offered a human transfer or callback
+- a **real 34-character CallSid** in `inbound_event` — every id in the tables today is simulated;
+- the timing budgets on a real network (p95 first-audio ≤ 1.2 s, refusal ≤ 150 ms, `T-01`/`T-17`);
+- a real handset's audio for barge-in, gibberish and lead-capture behaviour.
 
-Both are recorded in `docs/sdlc/work-status.md` §3a.
+The next section drives everything else without a carrier.
+
+---
+
+## Acceptance — T-01…T-17
+
+Two halves, and both are needed before US-001 can be called done.
+
+### Half 1 — drive Twilio's side yourself (no phone)
+
+`scripts/carrier_acceptance.py` is the client a carrier would be: it signs with the real auth
+token, downloads the TwiML, reads the `call_id`/`token` parameters out of it, opens the media
+stream with them, and speaks a synthesised question into it.
+
+```powershell
+cd D:\project\anitamedicalsystems\platform
+
+# preconditions only — is the tunnel up and the instance answering?
+.venv\Scripts\python.exe scripts\carrier_acceptance.py --check
+
+# everything that does not need a handset
+.venv\Scripts\python.exe scripts\carrier_acceptance.py
+```
+
+| Check | What it proves |
+|---|---|
+| T-16 | A signature computed for the **public** URL validates; the TwiML hands out the stream |
+| T-05 | An unsigned webhook is 403 with an empty body |
+| T-06 | A withheld number still gets a stream (the session keys on the stream SID) |
+| T-01 | The media round trip: synthesised speech → STT → answer → µ-law audio back |
+| T-12 | The admission ceiling holds; the refused call gets busy TwiML and **no** `<Stream>` |
+| T-13 | A dropped stream releases its slot; the next call is admitted |
+| §8.6 | A tokenless `wss://` connection naming a live call is **closed with 1008** and releases nothing |
+
+Exit code 0 means every check that ran passed; 2 means the preconditions were not met (usually a
+stale `TUNNEL_HOST` — see the "one thing that bites" at the top).
+
+**On this CPU-only host the ceiling is 1**, not 2 — the runner reports the effective number rather
+than asserting a fixed one. A GPU host admits 2.
+
+### Half 2 — the calls only a handset can make
+
+Dial **+12792365960** and work through these, watching the instance terminal and
+`logs/anita/perf_turns.jsonl`:
+
+| # | Do this | Expect |
+|---|---|---|
+| T-02 | Interrupt the answer mid-sentence | Remaining clauses stop; one `clear`; transcript marked truncated |
+| T-03 | "Can I speak to someone?" | Handoff row; the caller is told when to expect contact; the console Escalations panel shows it open |
+| T-04 | Say nothing intelligible three times | Re-prompt, line-quality hint, then a human-callback offer; the call closes |
+| T-07 | Give a name, no email | Lead saved partially and flagged |
+| T-08 | Ask the same question twice | Answered twice, one lead (phone dedupe) |
+| T-09 | Leave the line silent | The 30-minute cap closes the call; the transcript survives |
+| T-10 | Stop Ollama, then ask a price | The price still answers; open prose questions degrade to the verbatim answer |
+| T-14 | Call back within 6 h from the same number | The conversation and lead resume |
+| T-15 | Hang up after an answer | Summary written from the stored transcript; `conversation.closed` fires once |
+
+### Recording the evidence
+
+After both halves, check the carrier's own traces landed:
+
+```powershell
+# the real CallSid the carrier sent — 34 chars, starting "CA"
+.venv\Scripts\python.exe -c @"
+import sqlite3
+c = sqlite3.connect('logs/anita/anita_channels.sqlite')
+for row in c.execute('SELECT provider_event_id, channel_kind, state FROM inbound_event ORDER BY rowid DESC LIMIT 5'):
+    print(row)
+"@
+```
+
+Then update `docs/sdlc/work-status.md` §3a: move `T-01…T-17` from outstanding to passed, record
+the p95 first-audio figure from the traces, and re-class US-001 to `COMPLETED` only when a real
+CallSid is in the table and the timing budgets hold.

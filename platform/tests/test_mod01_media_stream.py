@@ -327,7 +327,7 @@ class TestTheSocketRoute:
     never registered — the state the HTTP webhook was in until it was wired.
     """
 
-    def _client(self, session, admission=None):
+    def _client(self, session, admission=None, tokens=None):
         from fastapi.testclient import TestClient
 
         from anita.server import create_app
@@ -335,10 +335,50 @@ class TestTheSocketRoute:
         from anita.voice_webhook import VoiceWebhook
 
         webhook = VoiceWebhook(
-            auth_token="t", public_base_url="https://a.example.com", admission=admission
+            auth_token="t", public_base_url="https://a.example.com",
+            admission=admission, stream_tokens=tokens,
         )
         router = Router(voice=webhook, voice_sessions=lambda _call_id: session)
         return TestClient(create_app(router))
+
+    def test_the_route_serves_an_admitted_call_that_presents_its_token(self):
+        """§8.6 over the real socket: the carrier's stream, which carries the
+        parameter the webhook minted, is served as before."""
+        from anita.browser_voice import SessionTokens
+
+        tokens = SessionTokens("test-secret")
+        admission = AdmissionController(max_concurrent_calls=2)
+        admission.admit("call-1")
+        session = FakeSession(end_after=99)
+        client = self._client(session, admission=admission, tokens=tokens)
+
+        with client.websocket_connect("/twilio/media-stream") as ws:
+            ws.send_text(json.dumps(_start(
+                customParameters={"token": tokens.mint("call-1")}
+            )))
+            ws.send_text(json.dumps(_media()))
+
+        assert session.frames_seen == 1
+        assert session.call_id == "call-1"
+
+    def test_the_route_refuses_a_stream_that_was_never_admitted(self):
+        """A direct `wss://` connection with no token is served nothing and,
+        at teardown, releases nothing."""
+        from anita.browser_voice import SessionTokens
+
+        tokens = SessionTokens("test-secret")
+        admission = AdmissionController(max_concurrent_calls=2)
+        admission.admit("call-1")          # a live call the forgery would name
+        session = FakeSession()
+        client = self._client(session, admission=admission, tokens=tokens)
+
+        with client.websocket_connect("/twilio/media-stream") as ws:
+            ws.send_text(json.dumps(_start()))
+            ws.send_text(json.dumps(_media()))
+
+        assert session.frames_seen == 0, "a refused stream must not reach the engine"
+        assert session.call_id == ""
+        assert admission.holds("call-1"), "the live call must keep its slot"
 
     def test_frames_sent_over_the_socket_reach_the_engine(self):
         session = FakeSession(end_after=99)
@@ -379,6 +419,113 @@ class TestTheSocketRoute:
         # Leaving the context closes the socket without a Twilio `stop`.
 
         assert admission.active_calls() == 0
+
+
+class TestTheStreamIsAdmitted:
+    """§8.6 — the media-stream socket is public, so it must prove it belongs to
+    an admitted call.
+
+    Before this, the handler accepted any connection and the relay only ever
+    *released* a slot: a direct `wss://` connection drove STT/TTS with no
+    admission, and a forged `call_id` released the slot of the live call it
+    named. Both are reproduced below as the tests that fail without the gate.
+    """
+
+    def _tokens(self):
+        from anita.browser_voice import SessionTokens
+
+        return SessionTokens("test-secret")
+
+    def test_a_stream_with_no_token_is_refused(self):
+        tokens = self._tokens()
+        session = FakeSession()
+        relay, sent = _relay(session=session)
+        relay.tokens = tokens
+
+        asyncio.run(_drive(relay, [_start(), _media()]))
+
+        assert relay.refused, "a tokenless stream must not run"
+        assert session.frames_seen == 0, "refused audio must never reach the engine"
+        assert session.call_id == ""
+        assert _media_events(sent) == []
+
+    def test_a_token_for_another_call_is_refused(self):
+        tokens = self._tokens()
+        relay, _ = _relay()
+        relay.tokens = tokens
+        forged = tokens.mint("some-other-call")
+
+        asyncio.run(relay.handle_message(json.dumps(
+            _start(customParameters={"token": forged})
+        )))
+
+        assert relay.refused == "token does not match the call"
+
+    def test_an_expired_or_garbage_token_is_refused(self):
+        relay, _ = _relay()
+        relay.tokens = self._tokens()
+
+        asyncio.run(relay.handle_message(json.dumps(
+            _start(customParameters={"token": "not.a.token"})
+        )))
+
+        assert relay.refused.startswith("token ")
+
+    def test_a_stream_for_a_call_that_holds_no_slot_is_refused(self):
+        """A valid token is not enough on its own: the call must still hold the
+        slot the webhook took, so a stream arriving after the slot was reaped
+        cannot resurrect the call."""
+        admission = AdmissionController(max_concurrent_calls=2)
+        tokens = self._tokens()
+        relay, _ = _relay(admission=admission)
+        relay.tokens = tokens
+
+        asyncio.run(relay.handle_message(json.dumps(
+            _start(customParameters={"token": tokens.mint("call-1")})
+        )))
+
+        assert relay.refused == "no admitted call for this stream"
+
+    def test_an_admitted_call_with_a_valid_token_is_served(self):
+        admission = AdmissionController(max_concurrent_calls=2)
+        admission.admit("call-1")
+        tokens = self._tokens()
+        session = FakeSession()
+        relay, sent = _relay(session=session, admission=admission)
+        relay.tokens = tokens
+
+        asyncio.run(_drive(relay, [
+            _start(customParameters={"token": tokens.mint("call-1")}),
+            _media(),
+        ]))
+
+        assert relay.refused == ""
+        assert session.call_id == "call-1"
+        assert session.frames_seen == 1
+        assert _media_events(sent), "the answer must still come back"
+
+    def test_a_refused_stream_cannot_release_a_live_calls_slot(self):
+        """The forgery this closes: name a live call on a socket you opened
+        without a token, then disconnect — the live call must keep its slot."""
+        admission = AdmissionController(max_concurrent_calls=2)
+        admission.admit("call-1")          # the real, in-progress call
+        tokens = self._tokens()
+
+        relay, _ = _relay(admission=admission)
+        relay.tokens = tokens
+        asyncio.run(relay.handle_message(json.dumps(_start())))  # no token
+        asyncio.run(relay.close(reason="disconnect"))
+
+        assert admission.holds("call-1"), "a refused socket released a slot it never held"
+
+    def test_a_relay_without_a_verifier_still_runs(self):
+        """Tests and harnesses drive the relay directly with no minter
+        installed; the gate must not make the relay unusable there."""
+        session = FakeSession()
+        relay, _ = _relay(session=session)
+        asyncio.run(_drive(relay, [_start(), _media()]))
+        assert relay.refused == ""
+        assert session.frames_seen == 1
 
 
 class TestTheSessionRow:

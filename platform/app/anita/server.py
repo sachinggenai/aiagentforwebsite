@@ -336,16 +336,27 @@ def create_app(router: Router, *, title: str = "ANITA MEDICAL SYSTEMS") -> FastA
                 send=websocket.send_json,
                 admission=router.voice.admission,
                 store=getattr(router.voice, "store", None),
+                # §8.6: the same minter the webhook stamped the TwiML with. The
+                # socket is public, so a stream that cannot prove it was
+                # admitted is refused rather than served.
+                tokens=getattr(router.voice, "stream_tokens", None),
             )
             try:
                 while True:
                     await relay.handle_message(await websocket.receive_text())
+                    if relay.refused:
+                        # Policy violation: no audio was fed and no slot was
+                        # taken. Close once, then fall through to teardown.
+                        await websocket.close(code=1008)
+                        break
             except WebSocketDisconnect:
                 # A caller who hangs up, or a dropped socket. Not an error.
                 await relay.close(reason="disconnect")
             except Exception:  # noqa: BLE001 - teardown must not depend on the cause
                 logger.exception("media stream: relay failed, tearing the call down")
                 await relay.close(reason="error")
+            else:
+                await relay.close(reason="refused" if relay.refused else "closed")
 
     @app.get("/", include_in_schema=False)
     async def chat_page() -> Any:

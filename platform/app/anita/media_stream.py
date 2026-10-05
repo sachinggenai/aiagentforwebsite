@@ -57,10 +57,16 @@ class TwilioMediaStream:
     JSON Twilio sends and assert what comes back.
     """
 
-    def __init__(self, *, session, send, admission=None, store=None) -> None:
+    def __init__(self, *, session, send, admission=None, store=None, tokens=None) -> None:
         self.session = session
         self._send = send
         self.admission = admission
+        # Verifies the token the webhook minted for an admitted call. Optional
+        # so a relay can be driven directly (tests, harnesses); when it is
+        # installed the stream is refused without a valid token — the socket is
+        # public and an unauthenticated one would drive the engine and release
+        # slots it never held (§8.6).
+        self.tokens = tokens
         # MOD-01's channel tables. Optional: a relay with no store still
         # carries the call, it just cannot offer a stable identity for a caller
         # who withheld their number, nor leave a row for a restart to reconcile.
@@ -72,6 +78,8 @@ class TwilioMediaStream:
 
         self._started = False
         self._closed = False
+        #: Why this stream was refused, or "". Set only by `_on_start`.
+        self.refused = ""
         self._frames_since_mark = 0
         self._marks_outstanding = 0
 
@@ -132,6 +140,17 @@ class TwilioMediaStream:
         self.call_id = str(params.get("call_id") or start.get("callSid") or "")
         self.caller = str(start.get("from") or "")
 
+        # §8.6: the socket is public and Twilio is not the only thing that can
+        # open one. Before any audio is fed, this stream must present the token
+        # the webhook minted for an admitted call. A `call_id` alone is a value
+        # anyone can guess or read out of a log, and a guessed one would both
+        # drive the engine and — at teardown — release the slot of the call it
+        # named.
+        self.refused = self._refusal(params) or ""
+        if self.refused:
+            logger.warning("media stream: refused (%s)", self.refused)
+            return
+
         # The engine keys its trace and its conversation on this.
         self.session.call_id = self.call_id
         # US-004: the caller's number from the carrier. Read here and, until
@@ -156,9 +175,33 @@ class TwilioMediaStream:
 
         logger.info("media stream: started (call %s)", _mask(self.call_id))
 
+    def _refusal(self, params: dict) -> str | None:
+        """Why this stream must not run, or `None` when it may.
+
+        Two questions, in order: did the webhook mint this call's token (so the
+        stream is the one Twilio was told to open), and does the call actually
+        hold a slot right now (so a stream that arrives after the slot was
+        reaped cannot resurrect it)?
+        """
+        if self.tokens is not None:
+            from .browser_voice import TokenError
+
+            try:
+                token = self.tokens.verify(str(params.get("token") or ""))
+            except TokenError as exc:
+                return f"token {exc.reason}"
+            if token.session_id != self.call_id:
+                return "token does not match the call"
+        if self.admission is not None:
+            if not self.call_id:
+                return "no call id"
+            if not self.admission.holds(self.call_id):
+                return "no admitted call for this stream"
+        return None
+
     async def _on_media(self, media: dict) -> None:
         """One 20 ms frame of caller audio."""
-        if self._closed:
+        if self._closed or self.refused:
             # Twilio can deliver frames that were already in flight when the
             # stream ended. Feeding them would append audio to a conversation
             # that has been closed and whose slot is already released.
@@ -322,6 +365,13 @@ class TwilioMediaStream:
         if self._closed:
             return
         self._closed = True
+
+        if self.refused:
+            # Nothing was started and no slot was taken, so there is nothing to
+            # release, no session row to close and no conversation to finish —
+            # and releasing here would be the very forgery this guards against.
+            logger.info("media stream: closed (refused: %s)", self.refused)
+            return
 
         if self._turn is not None and not self._turn.done():
             self._turn.cancel()

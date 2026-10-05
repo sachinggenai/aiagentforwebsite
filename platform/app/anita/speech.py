@@ -249,6 +249,17 @@ class AdmissionController:
         self._active[call_id] = self._clock()
         return AdmissionDecision(True, level=self._level)
 
+    def holds(self, call_id: str) -> bool:
+        """Whether this call currently holds a slot.
+
+        Distinct from `peek`: `peek` asks *would* the box admit another call,
+        which is true for a call that has not taken a slot at all. The media
+        stream needs the stricter question — a socket that was never admitted
+        must not be allowed to drive the engine, and must not be able to
+        release a slot it does not own.
+        """
+        return bool(call_id) and call_id in self._active
+
     def peek(self, call_id: str) -> AdmissionDecision:
         """Would this call be admitted, decided **without taking the slot**.
 

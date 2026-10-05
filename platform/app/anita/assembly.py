@@ -616,22 +616,14 @@ def assemble(
             f"deduplicated or attributed to this number"
         )
 
-    voice = VoiceWebhook(
-        auth_token=twilio_token,
-        public_base_url=public_base_url,
-        admission=admission,
-        callback_number=settings.env.get("ANITA_CALLBACK_NUMBER", ""),
-        store=channel_store,
-        instance_id=settings.isolation.db_schema,
-        address=voice_number,
-    )
-
-    # -- browser-mic voice (US-003) ----------------------------------------
-    # The signer the ticket route mints with and the voice socket verifies
-    # with. A configured secret survives restarts (a reconnect inside the 60 s
-    # window resumes); a generated one does not, and the note says so rather
-    # than leaving an operator to discover it as "the mic stops working after
-    # a deploy".
+    # -- session tokens (browser mic + Twilio media streams) ----------------
+    # The signer the browser ticket route mints with, and the signer the
+    # Twilio webhook stamps into its TwiML so the media-stream socket can
+    # prove the stream belongs to an admitted call (§8.6). A configured
+    # secret survives restarts (a browser reconnect inside the 60 s window
+    # resumes); a generated one does not, and the note says so rather than
+    # leaving an operator to discover it as "the mic stops working after a
+    # deploy".
     import secrets as _secrets
 
     from .browser_voice import SessionTokens
@@ -640,11 +632,22 @@ def assemble(
     if not session_secret:
         session_secret = _secrets.token_urlsafe(32)
         notes.append(
-            "ANITA_SESSION_SECRET unset — browser-mic session tokens are signed "
-            "with a per-process secret and will not survive a restart; set it "
-            "to keep the 60 s reconnect window across deploys"
+            "ANITA_SESSION_SECRET unset — browser-mic and voice-stream session "
+            "tokens are signed with a per-process secret and will not survive a "
+            "restart; set it to keep the 60 s reconnect window across deploys"
         )
     voice_tokens = SessionTokens(session_secret)
+
+    voice = VoiceWebhook(
+        auth_token=twilio_token,
+        public_base_url=public_base_url,
+        admission=admission,
+        callback_number=settings.env.get("ANITA_CALLBACK_NUMBER", ""),
+        store=channel_store,
+        instance_id=settings.isolation.db_schema,
+        address=voice_number,
+        stream_tokens=voice_tokens,
+    )
 
     # -- outbound sends (US-002) -------------------------------------------
     # The queue exists whenever the channel store does; the *sender* only when

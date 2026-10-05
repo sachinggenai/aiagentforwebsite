@@ -20,7 +20,10 @@ not a derivation.
 
 from __future__ import annotations
 
+import logging
 from xml.sax.saxutils import escape, quoteattr
+
+logger = logging.getLogger("anita.voice_webhook")
 
 TwiML_HEADER = '<?xml version="1.0" encoding="UTF-8"?>'
 MEDIA_STREAM_PATH = "/twilio/media-stream"
@@ -49,19 +52,27 @@ def websocket_url(public_base_url: str) -> str:
     return base + MEDIA_STREAM_PATH
 
 
-def build_stream_twiml(ws_url: str, call_id: str) -> str:
+def build_stream_twiml(ws_url: str, call_id: str, token: str = "") -> str:
     """TwiML that hands the call to our media stream.
 
     `call_id` is passed as a `<Parameter>` so the WebSocket handler learns which
     call it is holding from the stream itself, rather than correlating against
     some other table it would have to keep in step.
+
+    `token` is the signed proof that this call was admitted. The media-stream
+    socket is public, and a `call_id` alone is a value anyone can guess or
+    read out of a log; the token binds the stream to a webhook run that
+    actually took an admission slot (`TAC-5`, `TAC-7`).
     """
+    parameters = f'      <Parameter name="call_id" value={quoteattr(call_id)}/>\n'
+    if token:
+        parameters += f'      <Parameter name="token" value={quoteattr(token)}/>\n'
     return (
         f"{TwiML_HEADER}\n"
         "<Response>\n"
         "  <Connect>\n"
         f"    <Stream url={quoteattr(ws_url)}>\n"
-        f"      <Parameter name=\"call_id\" value={quoteattr(call_id)}/>\n"
+        f"{parameters}"
         "    </Stream>\n"
         "  </Connect>\n"
         "</Response>\n"
@@ -112,9 +123,15 @@ class VoiceWebhook:
         instance_id: str = "",
         address: str = "",
         channel_kind: str = "voice_inbound",
+        stream_tokens=None,
     ) -> None:
         self.auth_token = auth_token
         self.public_base_url = public_base_url
+        # Mints the token that proves a media stream belongs to an admitted
+        # call. Optional so the webhook works without one (tests, and a
+        # process that never mints); when absent, no token is emitted and the
+        # relay must not require one — both sides read the same object.
+        self.stream_tokens = stream_tokens
         self.admission = admission
         self.callback_number = callback_number
         # MOD-01's channel tables. Optional so the webhook is usable without a
@@ -175,7 +192,23 @@ class VoiceWebhook:
                     self.callback_number,
                 ), "application/xml"
 
-        return 200, build_stream_twiml(self._ws_url(), call_id), "application/xml"
+        return 200, build_stream_twiml(self._ws_url(), call_id, self._stream_token(call_id)), "application/xml"
+
+    def _stream_token(self, call_id: str) -> str:
+        """The proof the relay requires before it will run this call's stream.
+
+        Minted here, at the one moment the call is known to be admitted, and
+        verified on the socket. Without it a public `wss://` connection naming
+        any `call_id` would drive the engine and, at teardown, release a slot it
+        never held — which is how the admission ceiling was bypassed (§8.6).
+        """
+        if self.stream_tokens is None or not call_id:
+            return ""
+        try:
+            return self.stream_tokens.mint(call_id)
+        except Exception:  # noqa: BLE001 - a token failure must not drop a call
+            logger.exception("voice webhook: could not mint a stream token")
+            return ""
 
     def _attribute(self, params: dict):
         """Which endpoint this call arrived on.

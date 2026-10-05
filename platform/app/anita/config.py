@@ -520,7 +520,14 @@ def load_settings(
             ollama_url=_env(environment, "OLLAMA_URL", str(model_raw.get("ollama_url", ModelSettings.ollama_url))),
             ollama_model=_env(environment, "OLLAMA_MODEL", str(model_raw.get("ollama_model", ModelSettings.ollama_model))),
             ollama_num_ctx=_env_int(environment, "OLLAMA_NUM_CTX", int(model_raw.get("ollama_num_ctx", ModelSettings.ollama_num_ctx))),
-            ollama_keep_alive=str(model_raw.get("ollama_keep_alive", ModelSettings.ollama_keep_alive)),
+            # Every sibling here takes an environment override; this one did not,
+            # so `.env.example` declared a knob that nothing read — the config
+            # audit reported it as "pending (modules not yet built)" for a module
+            # that was built and running (§8.29).
+            ollama_keep_alive=_env(
+                environment, "OLLAMA_KEEP_ALIVE",
+                str(model_raw.get("ollama_keep_alive", ModelSettings.ollama_keep_alive)),
+            ),
             embed_model=_env(environment, "EMBED_MODEL", str(model_raw.get("embed_model", ModelSettings.embed_model))),
             mlx_model=_env(environment, "MLX_MODEL", str(model_raw.get("mlx_model", ModelSettings.mlx_model))),
             mlx_base_url=_env(environment, "MLX_BASE_URL", str(model_raw.get("mlx_base_url", ModelSettings.mlx_base_url))),

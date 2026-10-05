@@ -586,7 +586,8 @@ stand) and the live-Ollama prose check (a model download/CPU-bound run).
 
 | Check | Command | Result |
 |---|---|---|
-| Unit suite — **re-run** | `platform/.venv/Scripts/python -m pytest tests -q` | **1156 passed**, 1 skipped, 0 failed — 1132 at the sixth pass, +5 staging collection (§8.23), +11 WS admission (§8.6), +8 for the Batch 7 sweep (citation verdict, voice serialisation, retention, summary retry, probe, backoff) |
+| Unit suite — **re-run** | `platform/.venv/Scripts/python -m pytest tests -q` | **1161 passed**, 1 skipped, 0 failed — 1132 at the sixth pass, +5 staging collection (§8.23), +11 WS admission (§8.6), +8 Batch 7, +5 for the config audit (§8.29) |
+| Config audit — **re-run** | `anita.boot.preflight()` → AUDIT phase | **43 keys live · 5 pending**, and the five are `DATABASE_URL` + `DB_*` — CR-02's keys, which really have no code. Before §8.29 the bucket held 12 and called built modules unbuilt |
 | Carrier-free acceptance (US-001) — **added** | `platform/.venv/Scripts/python scripts/carrier_acceptance.py` | Drives Twilio's half of `T-01/T-05/T-06/T-12/T-13/T-16` over the public tunnel and prints the handset checklist. `--check` verifies preconditions only; run against a live tunnel + instance |
 | System integrity — **re-run** | `platform/.venv/Scripts/python scripts/system_check.py` | **20 passed · 0 failed · 0 warnings · 1 deferred** — 49 modules import, 47/49 reachable; UC-02/UC-03/UC-04 *driven*; UC-14 `NOT CONFIGURED`; UC-09 deferred |
 | Evaluation set — **re-run** | `platform/.venv/Scripts/python scripts/release_gate.py --no-browser` | **70 / 70 cases passed** — from the **frozen** set, sha256 `eb2ffc27…` (re-computed: matches the pin in `config/anita.yaml`) |
@@ -708,7 +709,7 @@ Ordered by severity, not by module. Everything here was reproduced or verified i
 | 8.26 | ✅ **Resolved 2026-10-04 (Batch 7).** The 15-minute rung was scheduled by nothing. The constants now distinguish the waits from the ceiling: five **attempts** (the send + four retries) with waits 5 s / 30 s / 2 m / 8 m, and `BACKOFF_CEILING_SECONDS = 900` as the documented 5 s → 15 min cap — defined for any caller that asks, never scheduled | `outbox.py` | The code, the tests and MOD-01's "5 attempts, 5 s → 15 min" now say the same thing |
 | 8.27 | ✅ **Resolved 2026-10-04 (Batch 7).** `AdapterRegistry` was built with no probe, so "declares → validates → **probes** → enables" skipped its third step in every deployment. `credential_probe(env)` now supplies one: the provider-neutral precondition every adapter shares is its HMAC secret, and a missing credential raises `AdapterUnreachable` naming the key (never the value) before the adapter is registered | `extra_channel.py` (`credential_probe`), `assembly.py` | A channel declared without its credential now refuses to enable at boot instead of authenticating nothing at the first inbound |
 | 8.28 | ✅ **Resolved 2026-10-04 (Batch 7) — every symbol called or removed.** *Wired:* `expire_transcript` + a new `transcripts_due_for_expiry` query became the janitor's retention duty (`DG-11`, `retention_days`, 0 = disabled), so the review's `expired` state is reachable in production; `unsummarised_closed` became the janitor's summary retry, so a summary lost to a transient store failure is retried instead of lost. *Removed:* `conversations_for_identity` (no caller), `resolve_whatsapp_session` (no caller, and buggy), the CRM outbox seam and its `crm_outbox` table (a second queue nothing produced or consumed; the live one is `outbox.SendOutbox`), `AdminSurface.traces` (a writer stored and never read), `FRAME_BYTES`, `OFFLINE_TEXT` | `conversation_store.py`, `orchestrator.py` (janitor), `crm.py`, `surfaces.py`, `media_stream.py`, `answer_engine.py` | New tests cover retention expiring a transcript while keeping the row, retention off when no window is configured, and a lost summary being retried on the next tick |
-| 8.29 | **The config audit's `PENDING` bucket has false negatives.** Keys read through a generic mapping (`values.get("SMTP_HOST")` in `notify.py`) or a dynamic env name (`secret_env`, extra channel) are not matched by `READ_PATTERNS`, so six keys are reported as "pending (modules not yet built)" although their modules are built and read them. The bucket errs safe — nothing read is called `INERT` — but the boot report's wording is wrong for these keys | `config_truth.py:36-49,259-279`, `notify.py:95-118`, `extra_channel.py:44,67` | A deployment reading its boot report is told built keys are unbuilt; the audit that exists to catch unread keys under-reports the reads it cannot see |
+| 8.29 | ✅ **Resolved 2026-10-04.** Three fixes, one of which found a real defect: (1) `mapping_get` now matches the receiver names the platform actually uses for the environment (`env`, `environment`, `environ`, `values`, `secrets`) — deliberately a short allowlist, because a catch-all would score `payload.get("STATUS")` as a read and a false LIVE is the one error this audit cannot afford (a test pins both directions); (2) `ANITA_EXTRA_CHANNEL_SECRET` joins `STRUCTURAL_READ_KEYS` — its name is a *value* from `config/anita.yaml`, so no regex can follow the read; (3) **`OLLAMA_KEEP_ALIVE` was genuinely unread** — every sibling model key took an environment override and it did not, so `.env.example` declared a knob that did nothing. It now reads from the environment like the rest. **Result:** the boot audit reports **43 live · 5 pending**, and the five are the `DB_*`/`DATABASE_URL` keys of CR-02, which really do have no code yet | `config_truth.py`, `config.py`, `notify.py`, `extra_channel.py` | The boot report no longer calls built modules unbuilt; the `PENDING` bucket is now trustworthy as "CR-02's keys" |
 
 ### Documentation defects
 
@@ -717,11 +718,11 @@ file and the most corrosive to leave: each one makes a document contradict the c
 
 | # | Defect | Where |
 |---|---|---|
-| 8.13 | The migration table lists MOD-01/02, MOD-05, MOD-06/07 and MOD-08/10 as `planned` when all are built, committed and tested; CR-01 is listed "PLANNED — ready to build" when it is 10/10 complete | `plan-state.md` §Migration status, §Change requests |
-| 8.14 | "Next action" still says **169 chunks**; reality is **141** (CV-04 resolved the plan as wrong, 169 was never propagated) | `plan-state.md` §Next action |
+| 8.13 | ✅ **Resolved 2026-10-04.** The migration table now marks MOD-01…MOD-10 ✅ **done** with the module paths as evidence, and CR-01 reads **DONE — 10/10 stories, C1–C9 PASS**. The duplicate MOD-01/02 row is gone; the file points at `work-status.md` for per-story detail rather than restating it | `plan-state.md` §Migration status, §Change requests |
+| 8.14 | ✅ **Resolved 2026-10-04.** "Next action" now says **141 chunks** (CV-04's correction) and, more usefully, is no longer a migration plan at all: all ten modules are built, and the section says what is actually next — US-001's carrier call, plus the items blocked on people | `plan-state.md` §Next action |
 | 8.15 | "What is still missing" says TAC-6 and AC-7 are not implemented — both were implemented in `4fe32b0` | `platform/docs/twilio-voice-setup.md` |
-| 8.16 | The store-integration matrix marks all four stores `NOT STARTED`, contradicting US-103 (Chroma persisted) and US-115 (SentimentStore Protocol) | `change-requests/STATUS.md` |
-| 8.17 | README status table claims MOD-01/02 "next" and "110 tests passing" | `platform/README.md` |
+| 8.16 | ✅ **Resolved 2026-10-04.** The matrix now reads: Vector `COMPLETED` (Chroma persisted, measured), Corpus/CRM/Sentiment `IN PROGRESS` — CR-01 done, CR-02 not started — with a correction note recording that only the CR-02 column was ever genuinely unstarted | `change-requests/STATUS.md` |
+| 8.17 | ✅ **Resolved 2026-10-04.** The README table marks MOD-01…MOD-10 ✅ **built** (the duplicated "next"/"planned" rows are gone), and the test count is **1156** with the command and a pointer to `work-status.md` §9 for what is open | `platform/README.md` |
 | 8.18 | ✅ **Resolved 2026-10-04 by CL-6/CL-9 (§10).** `shared/sentiment/core.py` named its logger `"anita.sentiment"` — a product-name leak in a package that must be product-agnostic; now `shared.sentiment`, and the fallback prompt is the generic constant | `shared/sentiment/core.py` |
 | 8.19 | ✅ **Resolved 2026-10-04.** The gate could not tell "no instance" from "product broken": with nothing listening it ran Playwright blind, the serial spec skipped the other 49, and it reported "1 scenario failed". Now it probes the instance's health endpoint first and returns `[NOT RUN] 0 scenarios — no instance on <url> … this is an environment problem, not a product failure`; the verdict still refuses promotion (an unrun suite is not evidence) but `combine_validation` says "browser suite did not run" instead of `failed: []`. **Not covered:** a *stale* instance is still an instance — verified live, a gate run found one failing scenario against a Streamlit process started at 10:41, predating the day's commits | `scripts/release_gate.py` |
 | 8.20 | ✅ **Resolved 2026-10-04 by US-002/US-003/US-004.** The UC-02/03/04/14 deferral reasons had become factually wrong — "no webhook route is served", "no audio path", "an extension point, verified by design review" were all false once the routes were built. The four entries are removed (only UC-09 remains deferred, which is still true) and each use case is now *driven* by `system_check` instead of asserted | `config/anita.yaml` → `release.deferred_use_cases`; `scripts/system_check.py` |
@@ -737,23 +738,21 @@ The full plan — per-story work, exit criteria, sizes, risks — is `completion
 
 ### Everything still open, in one list
 
-Updated 2026-10-04 after Batch 7. **Seven items, and only one of them is product work an agent can
-start without a person or a decision.**
+Updated 2026-10-04, after the document rewrite and the config-audit fix.
+**Five items — and not one of them is something an agent can finish alone.**
 
 | # | Item | Waiting on | Who |
 |---|---|---|---|
 | 1 | **US-001's real carrier call** — `T-01…T-17`'s handset half, a real CallSid in `inbound_event`, the timing budgets | a phone and the Twilio console. The code half is done (§8.6, `carrier_acceptance.py`) | **You** |
-| 2 | **§8.13–§8.17 — five stale documents** (`plan-state.md` ×2, the Twilio runbook, `change-requests/STATUS.md`, `platform/README.md`) | nothing. Pure edits | Me |
-| 3 | **§8.29 — the config audit's `PENDING` bucket** mislabels six keys as "modules not yet built" (SMTP_*, `ANITA_EXTRA_CHANNEL_SECRET`) | nothing. Small change to `config_truth` | Me |
-| 4 | **US-021 outbound worker** | DG-08 legal review | Blocked |
-| 5 | **CR-02 Postgres + Docker** | decisions Q9–Q12 (§5) | Blocked |
-| 6 | **DG-08 legal review** of the clinical-refusal wording | a lawyer. Blocks public launch | **You** |
-| 7 | **U-1 / U-2 / U-3** — three product questions (§6) | your answers | **You** |
+| 2 | **US-021 outbound worker** | DG-08 legal review | Blocked |
+| 3 | **CR-02 Postgres + Docker** | decisions Q9–Q12 (§5) | Blocked |
+| 4 | **DG-08 legal review** of the clinical-refusal wording | a lawyer. Blocks public launch | **You** |
+| 5 | **U-1 / U-2 / U-3** — three product questions (§6) | your answers | **You** |
 | — | Housekeeping: `.gitignore` the chroma probe dir · set `SMTP_*` and `ANITA_SESSION_SECRET` in the deployment | nothing / deployment values | Me / you |
 
-**Nothing in 1–7 is a defect in shipped code.** Every register entry that described broken or
-misleading behaviour (§8.1–§8.28) is now resolved; what remains is one acceptance run, five
-documents, one audit nicety, and four things that need a person.
+**Every defect in the register (§8.1–§8.29) is resolved, and every document that contradicted the
+code has been rewritten.** What remains is one acceptance run, two blocked builds, and three
+questions that need a person — nothing an agent can start alone.
 
 | Batch | Stories | Done when |
 |---|---|---|
@@ -790,14 +789,11 @@ UC-02/UC-03/UC-04/UC-14 entries were removed when their routes landed; UC-14 is 
 **Done in Batch 7:** the dead-code sweep (§8.12, §8.28) and the Twilio runbook's stale "What is
 still missing" section (§8.15).
 
-Still open, cheapest first:
+**Also done:** the four stale documents (§8.13, §8.14, §8.16, §8.17) and the config audit's
+`PENDING` bucket (§8.29).
 
-- **Rewrite the four remaining stale docs** (§8.13, §8.14, §8.16, §8.17) — `plan-state.md`'s
-  CR/migration tables and its "169 chunks" (reality: 141), the `change-requests/STATUS.md` store
-  matrix, and `platform/README.md`'s status table. Each one makes a document contradict the code it
-  describes, and none needs a decision — just the edit.
-- **Give the config audit eyes for indirect reads** (§8.29), so `SMTP_*`, `SALES_NOTIFY_EMAIL` and
-  `ANITA_EXTRA_CHANNEL_SECRET` stop being reported as "modules not yet built".
+Still open:
+
 - **Add the untracked probe to `.gitignore`** — `data/chroma_us103_probe/` (1.2 MB, a CR-01
   benchmark artefact) is the only untracked path in `git status`.
 - **Set the deployment values** the boot report asks for: `SMTP_*` + `SALES_NOTIFY_EMAIL` (so the

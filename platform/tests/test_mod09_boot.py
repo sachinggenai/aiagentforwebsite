@@ -268,6 +268,63 @@ class TestConfigAudit:
         report = config_truth.audit_config(env={"ANITA_ADMIN_TOKEN": "x"}, source_dir=src)
         assert "ANITA_ADMIN_TOKEN" in report.live
 
+    def test_a_named_env_mapping_read_counts(self, tmp_path):
+        """§8.29: the notifier receives the environment as `values`, so its
+        reads were invisible and `SMTP_*` was reported "pending (modules not
+        yet built)" in every boot report — for a module that was built."""
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "mod.py").write_text(
+            'def f(env):\n    values = env or {}\n'
+            '    return (values.get("SMTP_HOST") or "").strip()\n',
+            encoding="utf-8",
+        )
+        report = config_truth.audit_config(env={"SMTP_HOST": "smtp.example"}, source_dir=src)
+        assert "SMTP_HOST" in report.live
+        assert "SMTP_HOST" not in report.pending
+
+    def test_an_unrelated_mapping_is_not_a_read(self, tmp_path):
+        """The other direction, and the dangerous one: a false LIVE hides a key
+        nobody reads. A `payload.get("STATUS")` must not count."""
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "mod.py").write_text(
+            'def f(payload):\n    return payload.get("ANITA_UNUSED_KEY")\n',
+            encoding="utf-8",
+        )
+        report = config_truth.audit_config(env={"ANITA_UNUSED_KEY": "x"}, source_dir=src)
+        assert "ANITA_UNUSED_KEY" in report.inert
+        assert not report.ok
+
+    def test_every_declared_ollama_key_is_actually_read(self):
+        """`OLLAMA_KEEP_ALIVE` was the odd one out: its siblings all took an
+        environment override and it did not, so `.env.example` declared a knob
+        that nothing read (found by the §8.29 fix)."""
+        settings = load_settings(env={"OLLAMA_KEEP_ALIVE": "-1m"}, project_root=PLATFORM)
+        assert settings.model.ollama_keep_alive == "-1m"
+
+    def test_the_extra_channel_secret_is_a_structural_read(self):
+        """Its name comes from `config/anita.yaml`, so the read cannot be
+        matched by pattern — the exemption is explicit and audited here."""
+        report = config_truth.audit_config(
+            env={"ANITA_EXTRA_CHANNEL_SECRET": "s3cret"},
+            source_dir=PLATFORM / "app" / "anita",
+        )
+        assert "ANITA_EXTRA_CHANNEL_SECRET" in report.live
+
+    def test_no_built_key_is_still_reported_as_pending(self):
+        """The whole point of §8.29: the keys whose modules are built and which
+        read them must not appear in the "modules not yet built" bucket."""
+        report = config_truth.audit_config(
+            env={"SMTP_HOST": "smtp.example", "SMTP_PORT": "587",
+                 "SMTP_USER": "u", "SMTP_PASS": "p",
+                 "SALES_NOTIFY_EMAIL": "sales@example.com"},
+            source_dir=PLATFORM / "app" / "anita",
+        )
+        for key in ("SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS",
+                    "SALES_NOTIFY_EMAIL"):
+            assert key not in report.pending, f"{key} is read by notify.py"
+
     def test_report_carries_the_pattern_inventory(self, tmp_path):
         """An invisible checker is one people work around."""
         src = tmp_path / "src"

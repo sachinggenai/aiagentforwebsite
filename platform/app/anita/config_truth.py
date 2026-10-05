@@ -51,8 +51,24 @@ READ_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("environ_subscript", re.compile(r"""os\.environ\[\s*["']([A-Z][A-Z0-9_]*)["']\s*\]""")),
     ("environ_get", re.compile(r"""os\.environ\.get\(\s*["']([A-Z][A-Z0-9_]*)["']""")),
     ("getenv", re.compile(r"""os\.getenv\(\s*["']([A-Z][A-Z0-9_]*)["']""")),
-    # A settings-mapping read, e.g. env.get("KEY")
-    ("mapping_get", re.compile(r"""\benv(?:ironment)?\.get\(\s*["']([A-Z][A-Z0-9_]*)["']""")),
+    # A settings-mapping read, e.g. env.get("KEY").
+    #
+    # The receiver list is deliberately short and explicit rather than a
+    # catch-all `\w+\.get(...)`: a pattern that matched *any* mapping would
+    # score `payload.get("STATUS")` as a read of a key called STATUS, and a
+    # false LIVE is the one error this audit cannot afford — it would hide a
+    # key nobody reads, which is precisely what the audit exists to find.
+    #
+    # `values` and `secrets` are here because the notifier and the extra-channel
+    # ingress receive the environment under those names, and until 2026-10-04
+    # their reads were invisible: `SMTP_*` and `SALES_NOTIFY_EMAIL` were
+    # reported "pending (modules not yet built)" in every boot report (§8.29).
+    (
+        "mapping_get",
+        re.compile(
+            r"""\b(?:env|environment|environ|values|secrets)\.get\(\s*["']([A-Z][A-Z0-9_]*)["']"""
+        ),
+    ),
 )
 
 # Assignment to the environment is a write, never a read (false-positive trap 2).
@@ -74,6 +90,11 @@ STRUCTURAL_READ_KEYS: frozenset[str] = frozenset(
         # Read via the REQUIRED_SECRETS tuple in boot.py (presence check),
         # which looks the key up by variable rather than by literal.
         "ANITA_ADMIN_TOKEN",
+        # Read by the extra-channel ingress as `secrets.get(config.secret_env)`
+        # — the key is a *value* from `config/anita.yaml` (`channels.extra.
+        # secret_env`, shipped as this name), so no regex can follow it. The
+        # read is real: an inbound without this credential is refused by HMAC.
+        "ANITA_EXTRA_CHANNEL_SECRET",
     }
 )
 

@@ -20,17 +20,19 @@ Re-homed from the Meridian University admissions assistant. Full plan in
 | **MOD-03 Retrieval & Grounding** | ✅ **built** — `retrieval.py`: BM25, weighted RRF, **grounding gate** (TRD-13, TRD-14) |
 | **MOD-03 Embeddings, store & index lifecycle** | ✅ **built** — `embeddings.py`, `stores.py`, `index.py` (TRD-12, TRD-15) |
 | **MOD-04 LLM path, prompt assembly & grounding check** | ✅ **built** — `llm.py`, `prompts.py` (TRD-17, TRD-20, TRD-21) |
-| MOD-01/02 Channel Gateway & Orchestrator | next |
-| MOD-01/02 Channel Gateway & Orchestrator | planned |
-| MOD-05 Speech Services | planned |
-| MOD-06 Lead & Mock CRM | planned |
-| MOD-07 Sentiment & Escalation | planned |
-| MOD-08 Observability & Evaluation | planned |
-| MOD-10 Client Surfaces | planned |
+| **MOD-01 Channel Gateway** | ✅ **built** — US-001…US-003: Twilio webhook + media relay, WhatsApp, browser mic |
+| **MOD-02 Conversation Orchestrator** | ✅ **built** — US-004…US-006: identity, classification, transcripts |
+| **MOD-05 Speech Services** | ✅ **built** — US-016…US-018: STT/VAD, clause TTS + barge-in, admission ladder |
+| **MOD-06 Lead & Mock CRM** | ✅ **built** — US-019…US-022: capture, dedupe, handoffs, notification |
+| **MOD-07 Sentiment & Escalation** | ✅ **built** — US-023, US-024 |
+| **MOD-08 Observability & Evaluation** | ✅ **built** — US-025…US-027: traces, admin read API, frozen eval set |
+| **MOD-10 Client Surfaces** | ✅ **built** — US-007…US-009: web chat, browser voice, admin console |
 
-**110 tests passing.** The deterministic answer path is live over the real
-corpus: price, MOQ, delivery, specifications, comparison and company facts,
-all read from SQLite with no language model involved.
+**1156 tests passing** (`platform/.venv/Scripts/python -m pytest tests -q`), plus 54 browser
+scenarios across desktop and mobile. The deterministic answer path is live over the real corpus:
+price, MOQ, delivery, specifications, comparison and company facts, all read from SQLite with no
+language model involved. One story is not finished — **US-001's real carrier call** — and the open
+items are listed in [`../docs/sdlc/work-status.md`](../docs/sdlc/work-status.md) §9.
 
 ---
 

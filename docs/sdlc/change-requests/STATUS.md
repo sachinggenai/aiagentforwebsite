@@ -87,10 +87,14 @@ own evidence, because they fail independently.
 
 | Store | Today | After CR-01 | After CR-02 | Status |
 |---|---|---|---|---|
-| **Corpus** `data/out/ams.sqlite` | SQLite, read-only, 10 tables | unchanged | → PostgreSQL (loader import) | `NOT STARTED` |
-| **CRM** `logs/anita_crm.sqlite` | SQLite via `MockCrmStore` | unchanged; becomes the escalation sink (US-114) | → `PostgresCrmStore` behind the existing `CrmStore` Protocol | `NOT STARTED` |
-| **Vector** `InMemoryStore` | rebuilt per process, ~25s | → Chroma, persisted (US-103) | unchanged | `NOT STARTED` |
-| **Sentiment** in-memory dict | lost on restart | → behind `SentimentStore` Protocol (US-115) | → Postgres adapter | `NOT STARTED` |
+| **Corpus** `data/out/ams.sqlite` | SQLite, read-only, 10 tables | unchanged | → PostgreSQL (loader import) | `IN PROGRESS` — CR-01 done, CR-02 not started |
+| **CRM** `logs/anita_crm.sqlite` | SQLite via `MockCrmStore` | unchanged; becomes the escalation sink (US-114) | → `PostgresCrmStore` behind the existing `CrmStore` Protocol | `IN PROGRESS` — CR-01 done, CR-02 not started |
+| **Vector** `InMemoryStore` | rebuilt per process, ~25s | → Chroma, persisted (US-103) — **done, measured** | unchanged | `COMPLETED` |
+| **Sentiment** in-memory dict | lost on restart | → behind `SentimentStore` Protocol (US-115) — **done** | → Postgres adapter | `IN PROGRESS` — CR-01 done, CR-02 not started |
+
+*Corrected 2026-10-04:* the Status column read `NOT STARTED` for all four long after US-103 (Chroma
+persisted) and US-115 (SentimentStore Protocol) had landed and been verified — the matrix
+contradicted this same file's story table. Only the CR-02 column is genuinely not started.
 
 **Ordering constraint that must not be violated:** CR-02 changes the persistence layer *underneath*
 CR-01's modules. Doing both at once makes every regression ambiguous — you cannot tell whether a

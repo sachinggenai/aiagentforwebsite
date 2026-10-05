@@ -743,12 +743,54 @@ Updated 2026-10-04, after the document rewrite and the config-audit fix.
 
 | # | Item | Waiting on | Who |
 |---|---|---|---|
-| 1 | **US-001's real carrier call** — `T-01…T-17`'s handset half, a real CallSid in `inbound_event`, the timing budgets | a phone and the Twilio console. The code half is done (§8.6, `carrier_acceptance.py`) | **You** |
+| 1 | **US-001's real carrier call** — the handset half of `T-01…T-17`, a real CallSid in `inbound_event`, the timing budgets on a real network | a phone, the Twilio console, and a decision to open the public tunnel. **Everything else passes** — the carrier-free acceptance is green end to end (§7) | **You** |
 | 2 | **US-021 outbound worker** | DG-08 legal review | Blocked |
 | 3 | **CR-02 Postgres + Docker** | decisions Q9–Q12 (§5) | Blocked |
 | 4 | **DG-08 legal review** of the clinical-refusal wording | a lawyer. Blocks public launch | **You** |
 | 5 | **U-1 / U-2 / U-3** — three product questions (§6) | your answers | **You** |
 | — | Housekeeping: `.gitignore` the chroma probe dir · set `SMTP_*` and `ANITA_SESSION_SECRET` in the deployment | nothing / deployment values | Me / you |
+
+#### Carrier-free acceptance — 15/15, run 2026-10-04
+
+`scripts/carrier_acceptance.py` drives Twilio's whole side of a call — signing, the TwiML exchange,
+the media WebSocket, the ceiling — against a real instance. Result on this box:
+
+| Check | Result |
+|---|---|
+| `T-16` signature → TwiML → `call_id` + admission token | ✅ all four |
+| `T-05` unsigned webhook | ✅ 403, empty body |
+| `T-06` withheld number | ✅ stream issued |
+| `T-01` the round trip: synthesised speech → STT → answer → µ-law back | ✅ 500 ms of answer audio, **0 ms** to first audio with warm models |
+| `T-12` ceiling reached, refused call gets busy TwiML and no stream | ✅ (effective ceiling **2**) |
+| `T-13` dropped stream releases its slot | ✅ next call admitted |
+| §8.6 tokenless stream naming a live call | ✅ closed **1008** |
+
+**New `--local [port]` mode.** The default still drives the public tunnel; `--local` sends the HTTP
+POST and the WebSocket to loopback while signing for the instance's configured public URL. The
+signature covers a URL *string*, so the webhook validates it identically — what local mode does not
+exercise is TLS and the tunnel hop. It exists so the acceptance can run on a box that must not be
+exposed to the internet.
+
+**Two operational findings, both from running it rather than reading it:**
+
+1. **The VRAM ladder is live now, and it works — including when the box is full.** On the first run
+   every call came back as busy TwiML: with the GPU enabled, `CapacityMonitor` starts sampling and
+   had walked the ladder to `voice_shed` → `stt_off` → `commercial_only`. It was right to: Ollama
+   was holding **13.4 GB resident "Forever"** (`qwen2.5:14b` alone is 10 GB), leaving 1.4 GB against
+   a configured sibling floor of 6 GB. Unloading the idle models (`ollama stop`, a cache eviction —
+   they reload on demand) took free VRAM to 14.6 GB and the ladder climbed back to `full`, one rung
+   per sample with hysteresis. **This is US-018's first real execution** — its runtime trigger had
+   never fired on this box because the monitor only starts where there is a device.
+2. **An admitted call with no stream holds its slot for up to an hour.** The webhook takes the slot
+   and the relay releases it; a call that is admitted and never streams (a caller who hangs up in
+   between, a probe) keeps it until `release_stale` sweeps at 3600 s. With a two-slot ceiling, two
+   such calls refuse everyone — which is what the first two runs of this harness did to themselves.
+   The harness now gives back every slot it borrows. **Not yet addressed in the product**: a
+   short-lived reaper for "admitted but no stream" would be a genuine improvement.
+
+**What is still missing is only what needs a carrier**: the handset half of `T-01…T-17`, a real
+34-character CallSid, and the timing budgets on a real network. The steps are in
+`platform/docs/twilio-voice-setup.md`; the tunnel is the one part that needs your decision.
 
 **Every defect in the register (§8.1–§8.29) is resolved, and every document that contradicted the
 code has been rewritten.** What remains is one acceptance run, two blocked builds, and three

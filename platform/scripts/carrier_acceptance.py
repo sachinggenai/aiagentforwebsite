@@ -55,14 +55,35 @@ def report(status: str, name: str, detail: str = "") -> None:
 # The Twilio side of the exchange
 # ---------------------------------------------------------------------------
 class Carrier:
-    """Signs, posts and dials the way Twilio does."""
+    """Signs, posts and dials the way Twilio does.
 
-    def __init__(self, env: dict) -> None:
+    Two transport modes, and the difference is only where the bytes go:
+
+    * **public** (default) — everything over the tunnel, exactly as the carrier
+      would. Requires the tunnel to be up and `TUNNEL_HOST` to match it.
+    * **`--local [port]`** — the HTTP POST and the WebSocket go to
+      `127.0.0.1:<port>` while the *signature* is still computed for the
+      instance's configured public URL. The signature covers a URL string, not
+      a transport, so the webhook validates it identically; what is not
+      exercised is TLS and the tunnel hop. Use it to run the acceptance on a
+      box that must not be exposed; use the public mode for the carrier-premise
+      checks (`T-16`'s "public URL" clause in particular).
+    """
+
+    def __init__(self, env: dict, *, local_port: int | None = None) -> None:
         self.env = env
         self.host = (env.get("TUNNEL_HOST") or "").strip()
         self.token = (env.get("TWILIO_AUTH_TOKEN") or "").strip()
         self.number = (env.get("TWILIO_PHONE_NUMBER") or "").strip()
         self.base = f"https://{self.host}"
+        self.local = local_port is not None
+        self.transport = (
+            f"http://127.0.0.1:{local_port}" if self.local else self.base
+        )
+        self.ws_url = (
+            f"ws://127.0.0.1:{local_port}/twilio/media-stream" if self.local
+            else f"wss://{self.host}/twilio/media-stream"
+        )
         self._call_seq = 0
 
     def next_call_id(self, label: str) -> str:
@@ -81,15 +102,52 @@ class Carrier:
 
         from anita.channels import signed_payload
 
-        url = f"{self.base}/twilio/voice"
+        # Signed for the URL the instance validates against; sent wherever the
+        # transport points (the tunnel in public mode, loopback in local mode).
+        signed_url = f"{self.base}/twilio/voice"
         headers = {"Content-Type": "application/x-www-form-urlencoded"}
         if signed:
-            headers["X-Twilio-Signature"] = signed_payload(self.token, url, params)
+            headers["X-Twilio-Signature"] = signed_payload(self.token, signed_url, params)
         response = httpx.post(
-            url, content=urllib.parse.urlencode(params).encode(),
+            f"{self.transport}/twilio/voice",
+            content=urllib.parse.urlencode(params).encode(),
             headers=headers, timeout=30.0,
         )
         return response.status_code, response.text
+
+    async def _release(self, fields: dict) -> None:
+        """Give back a slot this script took but never used.
+
+        The webhook admits at `POST /twilio/voice` and the slot is released when
+        the media stream closes — so a call that is admitted and never streams
+        (a probe like `T-16`, a caller who hangs up before the stream opens)
+        holds its slot until `release_stale` sweeps it an hour later. With a
+        two-slot ceiling, two such calls refuse everyone. The acceptance must
+        therefore clean up after itself, or it poisons the next run.
+        """
+        if not fields.get("call_id") or not fields.get("token"):
+            return
+        try:
+            import websockets
+
+            async with websockets.connect(self.ws_url, open_timeout=10) as ws:
+                await ws.send(json.dumps({
+                    "event": "start",
+                    "start": {
+                        "streamSid": f"MZ{fields['call_id'][-12:]}",
+                        "callSid": fields["call_id"],
+                        "from": "+15550000000",
+                        "customParameters": {
+                            "call_id": fields["call_id"], "token": fields["token"],
+                        },
+                    },
+                }))
+                await ws.send(json.dumps({"event": "stop", "stop": {}}))
+        except Exception:  # noqa: BLE001 - teardown is best-effort by design
+            pass
+
+    def release(self, fields: dict) -> None:
+        asyncio.run(self._release(fields))
 
     def stream_parameters(self, twiml: str) -> dict:
         """The `<Parameter>` values the webhook handed the stream."""
@@ -124,10 +182,10 @@ def check_preconditions(carrier: Carrier) -> bool:
     import httpx
 
     try:
-        health = httpx.get(f"{carrier.base}/health", timeout=20.0)
+        health = httpx.get(f"{carrier.transport}/health", timeout=20.0)
         report(PASS if health.status_code == 200 else FAIL,
                "the instance answers over the tunnel",
-               f"GET {carrier.base}/health -> {health.status_code}")
+               f"GET {carrier.transport}/health -> {health.status_code}")
         ok &= health.status_code == 200
     except Exception as exc:  # noqa: BLE001
         report(FAIL, "the instance answers over the tunnel", f"{type(exc).__name__}: {exc}")
@@ -154,6 +212,7 @@ def check_signature(carrier: Carrier) -> dict:
     report(PASS if fields.get("token") else FAIL,
            "the stream carries an admission token",
            "minted" if fields.get("token") else "absent — §8.6 gate would refuse every call")
+    carrier.release(fields)          # this call borrowed a slot; give it back
 
     unsigned_status, unsigned_body = carrier.post_voice(params, signed=False)
     report(PASS if unsigned_status == 403 and not unsigned_body else FAIL,
@@ -164,6 +223,8 @@ def check_signature(carrier: Carrier) -> dict:
     status, body = carrier.post_voice(withheld)
     report(PASS if status == 200 and "<Stream" in body else FAIL,
            "T-06 — a withheld number still gets a stream", f"HTTP {status}")
+    if "<Stream" in body:
+        carrier.release(carrier.stream_parameters(body))
     return {"call_id": call_id, "params": fields}
 
 
@@ -180,7 +241,7 @@ class MediaCall:
         self.sent_at: float | None = None
         self.closed_code: int | None = None
 
-    async def run(self, frames: list[bytes], *, hold: float = 12.0,
+    async def run(self, frames: list[bytes], *, hold: float = 25.0,
                   stop: bool = True) -> None:
         import websockets
 
@@ -271,7 +332,14 @@ def caller_audio(question: str) -> list[bytes] | None:
     resampled = resample_poly(np.asarray(samples, dtype="float32"), 8000, int(rate))
     pcm = (np.clip(resampled, -1.0, 1.0) * 32767).astype("<i2").tobytes()
     ulaw = pcm_to_ulaw(pcm)
-    return [ulaw[i:i + 160] for i in range(0, len(ulaw) - 159, 160)]
+    frames = [ulaw[i:i + 160] for i in range(0, len(ulaw) - 159, 160)]
+    # Trailing silence is not padding — it is what ends the turn. The engine
+    # declares end-of-speech after 600 ms below the VAD floor, so a stream that
+    # stops the moment the words do leaves the turn open: the relay logs
+    # USER_SPEECH_STARTED and then closes with "0 turn(s) transcribed", which is
+    # exactly what the first run of this harness did. 1 s of µ-law silence
+    # (0xFF) after the speech.
+    return frames + [bytes([255]) * 160] * 50   # 0xFF is µ-law silence
 
 
 def check_media_round_trip(carrier: Carrier, parameters: dict) -> None:
@@ -292,7 +360,7 @@ def check_media_round_trip(carrier: Carrier, parameters: dict) -> None:
     report(INFO, "caller audio", f"{len(frames)} frames ({len(frames) * 20} ms of speech)")
 
     call = MediaCall(
-        f"wss://{carrier.host}/twilio/media-stream",
+        carrier.ws_url,
         fields.get("call_id", ""), fields.get("token", ""), "+15550000002",
     )
     try:
@@ -301,9 +369,13 @@ def check_media_round_trip(carrier: Carrier, parameters: dict) -> None:
         report(FAIL, "the stream carried the call", f"{type(exc).__name__}: {str(exc)[:80]}")
         return
 
-    spoke = len(call.media) * 160
+    # 8 kHz µ-law, 160 bytes per 20 ms frame — so frames × 20 ms is the audio
+    # duration. (A first version multiplied bytes by 8 and divided by 1000,
+    # which reported 32 ms for half a second of speech: a wrong number in the
+    # evidence is worse than no number.)
+    audio_ms = len(call.media) * 20
     report(PASS if call.media else FAIL, "the answer came back as audio",
-           f"{len(call.media)} frames ({spoke * 8 // 1000} ms)")
+           f"{len(call.media)} frames ({audio_ms} ms — up to the first mark)")
     ms = call.first_audio_ms()
     if ms is not None:
         report(PASS if ms <= 5000 else INFO, "first audio after end of speech",
@@ -334,7 +406,7 @@ def check_ceiling(carrier: Carrier) -> None:
 
     # Release every slot this check took, through the carrier's own path.
     for call_id, fields in admitted:
-        call = MediaCall(f"wss://{carrier.host}/twilio/media-stream",
+        call = MediaCall(carrier.ws_url,
                          fields.get("call_id", ""), fields.get("token", ""), "+15550000003")
         try:
             asyncio.run(call.run([], hold=1.0, stop=True))
@@ -349,7 +421,7 @@ def check_ceiling(carrier: Carrier) -> None:
            "T-13 — a dropped stream released its slot; the next call is admitted",
            f"HTTP {status}")
     fields = carrier.stream_parameters(body)
-    release = MediaCall(f"wss://{carrier.host}/twilio/media-stream",
+    release = MediaCall(carrier.ws_url,
                         fields.get("call_id", ""), fields.get("token", ""), "+15550000004")
     try:
         asyncio.run(release.run([], hold=1.0, stop=True))
@@ -373,7 +445,7 @@ def check_refusal(carrier: Carrier) -> None:
 
     async def forge() -> int | None:
         try:
-            async with websockets.connect(f"wss://{carrier.host}/twilio/media-stream") as ws:
+            async with websockets.connect(carrier.ws_url) as ws:
                 await ws.send(json.dumps({
                     "event": "start",
                     "start": {
@@ -396,7 +468,7 @@ def check_refusal(carrier: Carrier) -> None:
            "a tokenless stream naming a live call is closed",
            f"close code {code}")
 
-    release = MediaCall(f"wss://{carrier.host}/twilio/media-stream",
+    release = MediaCall(carrier.ws_url,
                         fields.get("call_id", ""), fields.get("token", ""), "+15550000005")
     try:
         asyncio.run(release.run([], hold=1.0, stop=True))
@@ -440,14 +512,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--check", action="store_true", help="preconditions only")
     parser.add_argument("--no-audio", action="store_true",
                         help="skip the media round trip (no TTS model needed)")
+    parser.add_argument(
+        "--local", nargs="?", type=int, const=8100, default=None, metavar="PORT",
+        help=("drive a local instance on 127.0.0.1:PORT instead of the public "
+              "tunnel. The signature is still computed for the configured "
+              "public URL, so the webhook validates it identically; TLS and the "
+              "tunnel hop are what this mode does not exercise."),
+    )
     args = parser.parse_args(argv)
 
     from anita.assembly import deployed_environment
 
     env = deployed_environment()
-    carrier = Carrier(env)
+    carrier = Carrier(env, local_port=args.local)
     print("=" * 84)
     print("US-001 CARRIER ACCEPTANCE — the Twilio side, driven without Twilio")
+    print(f"transport: {'local 127.0.0.1:' + str(args.local) if args.local else 'public tunnel'}"
+          f"   |   signature URL: {carrier.base}/twilio/voice")
     print("=" * 84)
 
     if not check_preconditions(carrier):

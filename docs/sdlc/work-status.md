@@ -788,9 +788,18 @@ exposed to the internet.
    The harness now gives back every slot it borrows. **Not yet addressed in the product**: a
    short-lived reaper for "admitted but no stream" would be a genuine improvement.
 
+**Run over the public tunnel as well** (2026-10-04, `cloudflared` quick tunnel → `wss://`): a cold
+instance scored **14/14** with **7459 ms** to first audio, and the warm re-run **15/15** with
+**0 ms**. Two things follow. The T-01/T-17 budget (p95 first-audio ≤ 1.2 s) is met comfortably once
+the models are warm, and *not* met on the first call after a cold start — the load dominates that
+turn, so a load test must warm the instance first or it will measure Whisper's start-up, not the
+product.
+
 **What is still missing is only what needs a carrier**: the handset half of `T-01…T-17`, a real
 34-character CallSid, and the timing budgets on a real network. The steps are in
-`platform/docs/twilio-voice-setup.md`; the tunnel is the one part that needs your decision.
+`platform/docs/twilio-voice-setup.md`; the tunnel is the one part that needs your decision — it
+opens this box (Twilio credentials, admin endpoints) to the internet, so it should be up only for
+the duration of a test.
 
 **Every defect in the register (§8.1–§8.29) is resolved, and every document that contradicted the
 code has been rewritten.** What remains is one acceptance run, two blocked builds, and three

@@ -550,7 +550,7 @@ failure came from the store swap or the module change. **CR-01 first, against SQ
 
 | Item | Status | Comment |
 |---|---|---|
-| **DG-06** Auth, rate limiting, Twilio signature validation | `COMPLETED` (code + config) — live confirmation pending a real call | `validate_twilio_signature()`, `RateLimiter` and admin bearer auth are built and tested. **`TWILIO_AUTH_TOKEN` and `TUNNEL_HOST` are now set in `.env`, and `.env` is actually loaded at boot** (`config.py::_environment`) — the preflight reports **zero** degradations. The earlier "TWILIO_AUTH_TOKEN is unset" note is obsolete. What remains: a real carrier call to confirm the signature path end to end |
+| **DG-06** Auth, rate limiting, Twilio signature validation | `COMPLETED` (code + config) — live confirmation pending a real call | `validate_twilio_signature()`, `RateLimiter` and admin bearer auth are built and tested. **`TWILIO_AUTH_TOKEN` and `TUNNEL_HOST` are now set in `.env`, and `.env` is actually loaded at boot** (`config.py::_environment`), so both secrets the signature path needs are present — the earlier "TWILIO_AUTH_TOKEN is unset" note is obsolete. **Precision (re-verified):** `preflight()` returns OK, while the deployed *assembly* reports three degradations — CPU host capped at 1 concurrent call, SMTP unconfigured, `ANITA_SESSION_SECRET` unset (§7). None touches authentication; the first is hardware, the other two are deployment values. What remains: a real carrier call to confirm the signature path end to end |
 | **DG-08** Legal review of clinical-refusal wording | `YET TO START` | A human/legal task, not engineering. Blocks public launch, and blocks UC-09 outbound (calling real buyers) |
 | U-1 UC-10 A1 "buyer declines a human" | `YET TO START` | Deferred — needs a decline intent that does not exist in the evidence. `escalation_enabled` is the operator equivalent for now |
 | U-2 `MIN_LABELED_OUTCOMES` operator-tunable? | `YET TO START` | Currently a code default of 100 |
@@ -700,7 +700,7 @@ Ordered by severity, not by module. Everything here was reproduced or verified i
 | 8.9 | ✅ **Resolved 2026-10-04 (Batch 0, US-027).** `passed` is derived: `passed=False` is set for a critical failure, a sub-floor grounded rate, or a regression over tolerance, and `passed=True` is reached only after all three rules pass; a tolerated non-critical failure is named in `reason` instead of being reported as "all N cases passed" | `observability.py:454-525` | The latent false-green is gone. (The register previously carried no ✅ here although the code was fixed — corrected this pass) |
 | 8.10 | ✅ **Resolved 2026-10-04 (Batch 7).** The call passed the asset path and a `call_sid` to `note_asset_played(self)`, which takes neither — a `TypeError` that would have fired the first time a deployment configured a refusal asset. The outcome axis is aggregate, so the call is now `REGISTRY.note_asset_played()` | `voice.py` (`_speak_fixed_response`) | The latent TypeError is gone; the degraded-vs-failed distinction the method exists for now works on the branch that uses it |
 | 8.11 | ✅ **Resolved 2026-10-04 by CL-1…CL-5 (§10); re-verified sixth pass.** `CLOSING_REPLY` is ANITA's (`voice.py:599`), `_CORRECTIONS` is catalogue vocabulary (`voice.py:1451-1464`), `_CLARIFICATION_RE` matches product/model/item (`voice.py:356-362`), `_META_MARKERS` says "catalogue profile" (`voice.py:541-553`), the prompt builder is a catalogue assistant (`voice.py:1723-1787`), and the logger is `anita.voice` (`voice.py:46`). Remaining "Meridian"/"university" hits are historical comments only | `voice.py` | Note the isolation guards that *list* sibling values (`config.py:127`, `index.py:76`, `config/anita.yaml`) are deliberate rejection lists and must stay |
-| 8.12 | **PARTIAL — one of four resolved, three still dead, one new.** `IndexLifecycle` **now has a production caller** (`scripts/rebuild_index.py:101` → `build_index` → `lifecycle.promote`). Still dead: `FRAME_BYTES` (`media_stream.py:44`, no other reference), `OFFLINE_TEXT` (`answer_engine.py:109`; the import at `surfaces.py:139` is its only occurrence), `EndOfSpeechTracker` (`speech.py:337`; the live engine has its own VAD, and the class is used only by tests and `scripts/voice_e2e.py`). **Also resolved in Batch 7:** `AdminSurface.traces` — a trace writer stored and never read — was removed outright (§8.28) rather than left implying an endpoint | `index.py`, `media_stream.py:44`, `answer_engine.py:109`, `speech.py:337`, `surfaces.py:520` | Confusing surface area; the origin of several "looks wired, isn't" claims. The index-lifecycle half of the claim is fixed and was the one that mattered |
+| 8.12 | ✅ **Resolved 2026-10-04 (Batch 7).** `IndexLifecycle` gained a production caller (`scripts/rebuild_index.py`), and the dead symbols went: `FRAME_BYTES` and `OFFLINE_TEXT` were removed outright, `AdminSurface.traces` (a writer stored, never read) was removed rather than left implying an endpoint, and `speech.EndOfSpeechTracker` **stays** — it is the diagnostic harness's VAD (`scripts/voice_e2e.py`), not a second product implementation, and the module says so | `index.py`, `media_stream.py`, `answer_engine.py`, `speech.py`, `surfaces.py` | The "looks wired, isn't" surface area is gone. One intentional keeper, documented |
 
 | 8.23 | ✅ **Resolved 2026-10-04 (same day it was found).** The index rebuild did not embed into the staging collection it names, so the gate validated the *previous* index and the promoted collection was filled in later, unvalidated. **Fix:** `index.staging_retriever()` retargets the embed to `build.collection`, `SharedRagRetriever.for_collection()` supplies a sibling bound to that collection, and `rebuild_index._gate_validator` points `chat.retriever` at the same sibling for the run and restores it afterwards, including on failure | `index.py` (`staging_retriever`, `build_index`), `rag_adapter.py` (`for_collection`), `rebuild_index.py` (`_gate_validator`) | **Evidence:** a real rebuild promoted `anita_ams__v5` with 141 vectors embedded and validated; with no serving process running, v5 held its 141 vectors immediately after promotion; a fresh process logs `serving promoted collection anita_ams__v5` with `store.count() == 141`. **Reproduction:** removing the retarget makes the second rebuild embed into `v1` instead of `v2` and the new test fails |
 | 8.24 | ✅ **Resolved 2026-10-04 (Batch 7).** The citation counts were computed, printed, and dropped before the verdict. `combine_validation` now takes them: a non-zero `uncited`/`incomplete` count — or a check that did not complete — refuses promotion and names the reason, and the counts travel into the JSON report (verified: `{'grounded': 55, 'uncited': 0, 'incomplete': 0}` is now in `release-gate.json`, which used to omit them entirely) | `observability.py` (`combine_validation`, `_citation_failure`), `release_gate.py` | A provenance regression can now refuse a release, which is what the `ChatReply` comment always claimed |
@@ -735,6 +735,26 @@ file and the most corrosive to leave: each one makes a document contradict the c
 The full plan — per-story work, exit criteria, sizes, risks — is `completion-plan-us-001-030.md`
 (user-approved 2026-10-04). This is the same sequence in one screen.
 
+### Everything still open, in one list
+
+Updated 2026-10-04 after Batch 7. **Seven items, and only one of them is product work an agent can
+start without a person or a decision.**
+
+| # | Item | Waiting on | Who |
+|---|---|---|---|
+| 1 | **US-001's real carrier call** — `T-01…T-17`'s handset half, a real CallSid in `inbound_event`, the timing budgets | a phone and the Twilio console. The code half is done (§8.6, `carrier_acceptance.py`) | **You** |
+| 2 | **§8.13–§8.17 — five stale documents** (`plan-state.md` ×2, the Twilio runbook, `change-requests/STATUS.md`, `platform/README.md`) | nothing. Pure edits | Me |
+| 3 | **§8.29 — the config audit's `PENDING` bucket** mislabels six keys as "modules not yet built" (SMTP_*, `ANITA_EXTRA_CHANNEL_SECRET`) | nothing. Small change to `config_truth` | Me |
+| 4 | **US-021 outbound worker** | DG-08 legal review | Blocked |
+| 5 | **CR-02 Postgres + Docker** | decisions Q9–Q12 (§5) | Blocked |
+| 6 | **DG-08 legal review** of the clinical-refusal wording | a lawyer. Blocks public launch | **You** |
+| 7 | **U-1 / U-2 / U-3** — three product questions (§6) | your answers | **You** |
+| — | Housekeeping: `.gitignore` the chroma probe dir · set `SMTP_*` and `ANITA_SESSION_SECRET` in the deployment | nothing / deployment values | Me / you |
+
+**Nothing in 1–7 is a defect in shipped code.** Every register entry that described broken or
+misleading behaviour (§8.1–§8.28) is now resolved; what remains is one acceptance run, five
+documents, one audit nicety, and four things that need a person.
+
 | Batch | Stories | Done when |
 |---|---|---|
 | **0. Foundations** ✅ | **US-025** trace · **US-027** frozen eval set · release-gate fixes (§8.5, §8.19) — *all done 2026-10-04* | Traces emit ✅ · the gate runs the frozen set with a pinned hash ✅ · an absent instance reads as `[NOT RUN] … not a product failure` ✅ · tooling scores the deployed environment ✅ |
@@ -767,24 +787,30 @@ UC-02/UC-03/UC-04/UC-14 entries were removed when their routes landed; UC-14 is 
 
 ### Housekeeping (parallel, any time)
 
-- **Rewrite the five stale docs** (§8.13–§8.17) — `plan-state.md`'s CR/migration tables and "169
-  chunks", the Twilio runbook's "What is still missing" (TAC-6/AC-7 are implemented), the
-  `change-requests/STATUS.md` store matrix, and `platform/README.md`'s status table. This is the
-  cheapest work in the file and the most corrosive to leave.
-- **Sweep the dead code** (§8.12, §8.28): call it or delete it. The two that matter are
-  `expire_transcript` (the review's `expired` state is unreachable in production without a caller)
-  and `resolve_whatsapp_session` (dead, and buggy if ever called).
+**Done in Batch 7:** the dead-code sweep (§8.12, §8.28) and the Twilio runbook's stale "What is
+still missing" section (§8.15).
+
+Still open, cheapest first:
+
+- **Rewrite the four remaining stale docs** (§8.13, §8.14, §8.16, §8.17) — `plan-state.md`'s
+  CR/migration tables and its "169 chunks" (reality: 141), the `change-requests/STATUS.md` store
+  matrix, and `platform/README.md`'s status table. Each one makes a document contradict the code it
+  describes, and none needs a decision — just the edit.
 - **Give the config audit eyes for indirect reads** (§8.29), so `SMTP_*`, `SALES_NOTIFY_EMAIL` and
   `ANITA_EXTRA_CHANNEL_SECRET` stop being reported as "modules not yet built".
 - **Add the untracked probe to `.gitignore`** — `data/chroma_us103_probe/` (1.2 MB, a CR-01
-  benchmark artefact) currently shows up as the only untracked entry in `git status`.
+  benchmark artefact) is the only untracked path in `git status`.
+- **Set the deployment values** the boot report asks for: `SMTP_*` + `SALES_NOTIFY_EMAIL` (so the
+  rep is emailed rather than the handoff staying `open`) and `ANITA_SESSION_SECRET` (so browser-mic
+  tokens survive a restart). Both are unset on this machine; neither is a code change.
 - **§10 — the university-domain cleanup tasks**: all CL-1…CL-11 done; nothing outstanding.
 
-**Commit state:** every code change described in §3a is committed (`8402833`, `d053304`, `f380d97`,
-`382622e`, `a04771f`, `dfcb6c4`, `4fe32b0`, `6d06229`). The only untracked path is the runtime
-probe directory above. The branch is still named `chore/secret-hygiene-and-config-audit`; if this
-becomes a PR it should be renamed. **This sixth-pass revision of `work-status.md` is uncommitted**
-until the next commit.
+**Commit state:** every code change described in this file is committed — the US-001 build log
+(`8402833`, `d053304`, `f380d97`, `382622e`, `a04771f`, `dfcb6c4`, `4fe32b0`, `6d06229`), then the
+audit (`1f18ff8`), the staging-collection fix (`bded3be`), the WS-admission gate and acceptance
+harness (`03dc8b9`), and the Batch 7 sweep (`7be50e9`). The only untracked path is the runtime probe
+directory above. The branch is still named `chore/secret-hygiene-and-config-audit`; if this becomes a
+PR it should be renamed.
 
 ---
 

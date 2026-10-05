@@ -14,6 +14,12 @@ data/raw/
 data/pages/
 data/out/
 
+# Runtime artefacts written by the platform itself, not sources:
+# `chroma_us103_probe/` is the CR-01 persistence benchmark's collection (US-103);
+# deleting it costs a re-run, not a rebuild.
+data/chroma_us103_probe/
+data/chroma_anita/
+
 # Keep the directory skeletons
 !data/raw/.gitkeep
 !data/pages/.gitkeep

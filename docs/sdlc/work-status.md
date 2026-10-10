@@ -1,4 +1,4 @@
-> **Lens:** TPO · **Updated:** 2026-10-10 (seventh pass — every headline number re-run on the unchanged tree, then every story re-derived from call sites; one story demoted, seven defects added. **§8.30 and §8.31 fixed the same day**, restoring US-017 to `COMPLETED` and the WS gate to whole) · **Scope:** every workstream — the SDLC plan (Stages 0–11), the D4 build (US-001…US-030), CR-01 (US-101…US-115), CR-02, and the open items.
+> **Lens:** TPO · **Updated:** 2026-10-10 (seventh pass — every headline number re-run on the unchanged tree, then every story re-derived from call sites; one story demoted and restored, seven defects added and **all seven fixed the same day**, leaving no open engineering item) · **Scope:** every workstream — the SDLC plan (Stages 0–11), the D4 build (US-001…US-030), CR-01 (US-101…US-115), CR-02, and the open items.
 > **Companion to:** `plan-state.md` (plan checkpoint) and `change-requests/STATUS.md` (CR-01 build checkpoint). This file is the **whole-of-work** view across all of them.
 
 # Work Status — ANITA MEDICAL SYSTEMS
@@ -67,9 +67,9 @@ number that moved, moved because the last pass was wrong, not because the code c
   tokenless `wss://` connection **that sent `start`**; a stream that went straight to `media` frames
   was never refused, because `self.refused` is only ever set inside `_on_start`. `_on_media` now
   refuses `media before start`. §8.31 has the reproduction.
-* **Five more defects** (`8.32`–`8.36`) and one validator failure class, all recorded below. None of
-  them is a regression — the code is the sixth pass's code, and the sixth pass's own register said
-  it was clean. They are what a second audit of the same tree finds.
+* **Five more defects** (`8.32`–`8.36`) and one validator failure class, all recorded below and all
+  closed the same day. None of them is a regression — the code is the sixth pass's code, and the
+  sixth pass's own register said it was clean. They are what a second audit of the same tree finds.
 * **Three stale line references and two internal contradictions were corrected** in place
   (`US-011`, `US-016`, `US-025`; §7's "36 keys live"; §8.15's open marker against §9's "done").
 
@@ -92,6 +92,23 @@ without ever sending `start` refused (`media before start`) instead of reaching 
 token, no identity and no slot. **Evidence:** `pytest tests -q` → **1176 passed, 1 skipped** (13 new);
 `system_check.py` → **20 · 0 · 0 · 1 deferred**, unchanged; and every reproduction was probed by
 reverting each half of the fix and watching the new tests fail (3, 2, 1 and 1 tests respectively).
+
+**§8.32–§8.36 — all five closed the same day.** None needed a decision, which is the point: the
+seventh pass's finding was that this file's open list had stopped being "things only a person can
+do". The status callback releases the slot only on a **terminal** `CallStatus`; the citation rule
+became one function that the **promotion path** and the release gate both run, so a rebuild can no
+longer be promoted on answers the gate would have failed; the janitor's summary retry rebuilds a
+conversation **from the store**, which is what makes it work after a restart and on the rows
+`sweep_idle` closes for threads this process never held; a refused boot of **any** kind writes no
+report, not just an isolation refusal; and the two runtime artefacts are **untracked** with the
+README's count corrected. **Evidence:** `pytest tests -q` → **1194 passed, 1 skipped** (18 more);
+`release_gate.py --no-browser` → **70/70**, 55 grounded · 0 uncited · 0 incomplete, unchanged; and
+each of the four code fixes was probed by reverting it — **6, 4, 1 and 1** tests fail respectively.
+One environment note: `system_check` reports **19 passed · 0 failed · 1 deferred** rather than 20,
+because UC-04 is now `NOT TRIGGERABLE HERE — voice shed at level voice_shed`. That is the **VRAM
+ladder working**, not a regression: `nvidia-smi` shows **446 MiB free of 16 311** against a
+configured `sibling_floor_mib: 6000`, because the sibling product's Ollama models are resident on
+the card. Sampling the policy directly logs `capacity degrade → voice_shed`.
 
 *(Sixth pass, retained as the record of how the current labels were derived.)* **That revision was
 the result of a call-site audit of the whole platform (2026-10-04, evening).**
@@ -310,7 +327,7 @@ int16/normalised mismatch fails as a *hallucination*, not an exception.
 | C5 | `asset_path()` returns `None` by design, then `None.is_file()` was called outside the try block | ✅ Fixed |
 | C6 | `ClauseCutter` API mismatch — the engine read `.text`, ANITA's returns plain `str` | ✅ Fixed |
 | C7 | Two separate `AdmissionController` instances (`voice_admission` vs `assembly`), so voice capacity was counted twice and the ceiling would not hold | ✅ Fixed — assembly installs its controller into the engine's seam |
-| C8 | `ChannelGateway.public_base_url` is never set by `assembly.py`, so signature validation would compare against `""` | ⬜ Open |
+| C8 | `ChannelGateway.public_base_url` is never set by `assembly.py`, so signature validation would compare against `""` | ✅ **Fixed — confirmed seventh pass.** `assembly.py:383-393` derives it from `TUNNEL_HOST`, `ChannelGateway.__init__` stores it (`channels.py:307,315`) and uses it to build the signed URL (`:358`). The marker here was stale; §3a records the fix |
 
 ### The answer path — C1/C2 in depth
 
@@ -670,11 +687,11 @@ evolution is not this product's regression.
 
 | Check | Command | Result |
 |---|---|---|
-| Unit suite — **re-run seventh pass, after the §8.30/§8.31 fix** | `platform/.venv/Scripts/python -m pytest tests -q` | **1176 passed**, 1 skipped, 0 failed, in 37 s — 1163 on the untouched tree (byte-identical to the sixth pass's figure), +13 for the two fixes. Two warnings: a Starlette/httpx deprecation, and the CL-11 sibling-drift warning working as designed |
-| §8.30 / §8.31 reproductions — **added seventh pass** | revert each half of the fix, re-run | **3, 2, 1 and 1 tests fail** respectively — the relay never arming the window, the frame-path guard absent, `end_turn` clearing the flag, and the flag never being consumed. Every reproduction is real, not asserted |
+| Unit suite — **re-run seventh pass, after all seven fixes** | `platform/.venv/Scripts/python -m pytest tests -q` | **1194 passed**, 1 skipped, 0 failed, in 42 s — 1163 on the untouched tree (byte-identical to the sixth pass's figure), +13 for §8.30/§8.31 and +18 for §8.32–§8.36. Two warnings: a Starlette/httpx deprecation, and the CL-11 sibling-drift warning working as designed |
+| §8.30–§8.35 reproductions — **added seventh pass** | revert each fix, re-run | **3, 2, 1, 1** for §8.30/§8.31, then **6, 4, 1, 1** for §8.32–§8.35 — the relay never arming the window, the frame-path guard absent, `end_turn` clearing the flag, the flag never consumed, the status callback releasing on progress, the citation verdict dropped, the retry reading only memory, and the report written on a non-isolation refusal. Every reproduction is real, not asserted |
 | Config audit — **re-run seventh pass** | `anita.boot.preflight()` → AUDIT phase | **43 keys live · 5 pending**, reproduced exactly. The five are `DATABASE_URL` + `DB_HOST`/`DB_PORT`/`DB_USER`/`DB_PASSWORD` — CR-02's keys, which really have no code (`files_scanned=50`, `inert=[]`) |
 | Carrier-free acceptance (US-001) — **not re-run** | `platform/.venv/Scripts/python scripts/carrier_acceptance.py` | Needs a live public tunnel **and** a running instance; neither is up. Sixth-pass result: **15/15** over the public tunnel (14/14 cold, warm re-run 15/15). Drives Twilio's half of `T-01/T-05/T-06/T-12/T-13/T-16` and prints the handset checklist. `--check` verifies preconditions only |
-| System integrity — **re-run seventh pass** | `platform/.venv/Scripts/python scripts/system_check.py` | **20 passed · 0 failed · 0 warnings · 1 deferred**, reproduced exactly — 49 modules import, 47/49 reachable, 11 dependencies wired; UC-02/UC-03/UC-04 *driven*; UC-14 `NOT CONFIGURED`; UC-09 deferred |
+| System integrity — **re-run seventh pass, after the fixes** | `platform/.venv/Scripts/python scripts/system_check.py` | **19 passed · 0 failed · 0 warnings · 1 deferred** — 49 modules import, 47/49 reachable, 11 dependencies wired; UC-02/UC-03 *driven*; UC-14 `NOT CONFIGURED`; UC-09 deferred. It was **20 passed** earlier in the same pass; the difference is **UC-04, now `NOT TRIGGERABLE HERE — voice shed at level voice_shed`**, and that is the capacity ladder working rather than a failure. `nvidia-smi` reads **446 MiB free of 16 311** against `sibling_floor_mib: 6000` because the sibling product's Ollama models are resident; sampling `CapacityPolicy` directly logs `capacity degrade → voice_shed`. No failures either way |
 | Evaluation set — **re-run seventh pass** | `platform/.venv/Scripts/python scripts/release_gate.py --no-browser` | **70 / 70 cases passed** — from the **frozen** set. The SHA-256 was recomputed independently this pass: `eb2ffc27c88cf18ed872d042b2f93b6fdae20efe3f7911dfd820a2e9173164dd`, matching the pin in `config/anita.yaml:183` exactly, 70 cases |
 | Citation integrity (US-012) — **re-run seventh pass** | `scripts/release_gate.py` section 1 | **55 grounded answers, 0 uncited, 0 incomplete** — reproduced, and now written into `data/out/reports/release-gate.json` as `citations: {grounded: 55, uncited: 0, incomplete: 0}` (§8.24 verified) |
 | Boot preflight — **re-run seventh pass** | `anita.boot.preflight()` | **OK**, exit 0. LOAD · AUDIT · ISOLATION (`db=anita_ams/anita collection=anita_ams__v1 ports=8100,8601,8602,8085`) · SECRETS · PLATFORM (`device=cuda backend=ollama model=qwen2.5:14b voice_capable=True — NVIDIA GeForce RTX 5060 Ti`) · DATA (**141 chunks**) · INDEX (**live collection `anita_ams__v5`**) · WARM (ollama reachable) all green. **One** degradation: SMTP unconfigured. The sixth pass's "36 keys live" in this row was wrong — the audit says 43, and the same table already said so one row above |
@@ -806,18 +823,18 @@ the same code finds when it asks *who calls this* rather than *does this exist*.
 |---|---|---|---|
 | 8.30 | ✅ **Resolved 2026-10-10, the day it was found.** **The barge-in detector had no live trigger.** `mark_speaking()` — the only writer of `STATE_SPEAKING` and the only caller of `note_playback()` — had **zero call sites** repository-wide, so `admit_inbound_frame` returned `FRAME_LISTENING` unconditionally and every consumer of its verdict was dead on a real call. **Fix:** `send_frames` (both relays — `media_stream.py` and `browser_voice.py`, the one choke point each transport's outbound audio passes through) calls `mark_speaking()` on the turn's **first** batch and `note_playback()` on every batch after it; `_run_turn`'s `finally` calls `end_turn()`. On the engine side `end_turn()` no longer clears `_turn_began_as_interruption`, and `process_utterance` consumes that flag exactly once, where it decides the min-burst floor. **A latent leak was closed with it:** the flag had no live clearer at all, so a single interruption would have held every later utterance on the call to the interruption floor. **Evidence:** 13 new tests (5 relay window, 4 engine lifecycle, 3 frame-path gate, 1 browser relay); the end-to-end one drives a **real `VoiceCallSession`** through the relay with neither the verdict nor `_speaking` stubbed. Every reproduction probed by reverting the fix — 3, 2, 1 and 1 tests fail respectively | `voice.py:776,790,793,855,945,1243-1258` · `media_stream.py:329` · `browser_voice.py:402` | **US-017 restored to `COMPLETED`.** On a telephone call the assistant now stops speaking when the caller talks over it. The gate's *thresholds* are confirmed on the real carrier call (§3a) |
 | 8.31 | ✅ **Resolved 2026-10-10.** **The media-stream gate guarded the `start` event, not the frame path.** `self.refused` is initialized `""` and set only inside `_on_start`; a client that opened the public socket and sent `media` frames without ever sending `start` was never refused and reached `feed_audio` with `call_id == ""`. **Fix:** `_on_media` refuses `media before start` — the receive loop then closes with 1008 and `close()` releases nothing, because `refused` is set. The rule is protocol as much as security: without `start` the engine has no call identity, so the conversation would be keyed on an empty string. Twilio always sends `start` first, so nothing legitimate is refused, and the refusal holds even with no verifier wired. **Evidence:** 2 new tests (refused with a verifier installed, and refused with no gate at all); both fail without the guard | `media_stream.py:204-222` | Corrects the §8.6 ✅: the gate is now whole. "No unauthenticated stream drives the engine" is finally true |
-| 8.32 | ⬜ **Open (latent).** **`status()` releases the admission slot on *any* status callback, not only terminal ones.** `voice_webhook.py:251-253` releases whenever `CallSid` is present, with no check of `CallStatus` — while the docstring at `:238-241` states "released on any terminal status". Harmless under Twilio's default callback set (`completed`), which is what `scripts/update_twilio_webhook.py` configures; but a number whose `statusCallbackEvent` includes `ringing`/`initiated`/`answered` would release a **live** call's slot mid-call, eroding the 2-call ceiling for the rest of that call. **Fix direction:** release only for `completed`/`busy`/`no-answer`/`failed`, and name the ignored statuses | `voice_webhook.py:235-255` | A configuration change turns a latent defect into a live one. Cheap to close now |
-| 8.33 | ⬜ **Open.** **Citation integrity cannot refuse an index promotion.** §8.24 wired the `uncited`/`incomplete` counts into `combine_validation`, but only the *release-gate script* passes them (`release_gate.py:335-337`). The rebuild path validates through `QualityGate.evaluate` alone (`rebuild_index.py:127-132`), which asserts answer text and never sees provenance — so `rebuild_index.py` can promote a collection while uncited answers exist, which is the one moment the check was written for | `rebuild_index.py:127-132` · `observability.py:442,691-694` | §8.24's claim "a provenance regression can now refuse a release" is true of the gate run and not of a promotion |
-| 8.34 | ⬜ **Open.** **The janitor's summary retry cannot repair the case it exists for.** `Orchestrator.retry_summaries` only restores summaries for conversations still held in `registry._by_key` (`orchestrator.py:938-955`); after a restart, every id `unsummarised_closed` returns is skipped, so the rows stay unsummarised forever and the `resummarised` counter stays 0. The companion path has the same shape: `ConversationRegistry.sweep_idle` closes store rows but summarises only the ones it can find in memory — so a conversation this process never held is closed **without** a summary, which is exactly what the retry was added to fix (§8.28) | `orchestrator.py:573-587,938-955` | Summaries lost to a restart are lost permanently. Retention and the retry both work; the retry's *scope* is the bug |
-| 8.35 | ⬜ **Open (docs precision).** **US-030's "a refused boot leaves no artifact behind" is narrower than the story claims.** `boot.write_report` suppresses the report only when the **ISOLATION** phase failed (`boot.py:381-384`); a refusal arising from AUDIT, SECRETS, DATA or INDEX still writes `logs/anita/preflight.json` (`:385-388`). The isolation case — the one the story's acceptance test exercises — is correct | `boot.py:381-388` | The claim is true of the demonstrated case and not of the general one |
-| 8.36 | ⬜ **Open (housekeeping).** Two runtime artefacts are **tracked in git**, so the tree is never clean and one of them is actively misleading: `platform/logs/anita_crm.sqlite` (the live CRM database — modified by any run) and `platform/logs/anita/preflight.json`, whose committed content still reads `"25 key(s) live, 16 pending (modules not yet built)"` from the first commit, contradicting the current `43 live · 5 pending`. Also stale: `platform/README.md:31` claims "1156 tests passing" (actual 1163 passing, 1164 collected), and this file's own §7 said "36 keys live" against the audit's 43. **Fix direction:** `git rm --cached` both paths and gitignore them (the same treatment `data/chroma_anita/` already got), and correct the two counts | `platform/logs/anita_crm.sqlite` · `platform/logs/anita/preflight.json` · `platform/README.md:31` | Permanent `M`/noise in every `git status`; a committed report that contradicts the code it reports on |
+| 8.32 | ✅ **Resolved 2026-10-10.** **`status()` released the admission slot on *any* status callback, not only terminal ones.** It released whenever `CallSid` was present, with no check of `CallStatus` — while its own docstring said "released on any terminal status". Harmless under Twilio's default callback set, but a number configured with `statusCallbackEvent` including `ringing`/`answered` would release a **live** call's slot mid-call and the 2-call ceiling would quietly stop holding. **Fix:** `TERMINAL_CALL_STATUSES` (completed / busy / no-answer / failed / canceled) is the only set that releases; known progress statuses are kept and logged at debug, and an unrecognised or absent `CallStatus` keeps the slot and warns — keeping it is the recoverable error, because `release_stale` sweeps it, while freeing a live call's slot is not. **Evidence:** 7 new tests — all five progress statuses parametrised, the absent-status case, and every terminal status releasing. Reverting the guard fails 6 | `voice_webhook.py:32-46,235-278` | The ceiling now holds under any callback configuration, not just the default one |
+| 8.33 | ✅ **Resolved 2026-10-10.** **Citation integrity could not refuse an index promotion.** §8.24 wired the counts into `combine_validation`, but only the *release-gate script* passed them: `rebuild_index.py` validated through `QualityGate.evaluate` alone, which asserts answer text and never sees provenance — so a rebuild could promote a collection while uncited answers existed, the one moment the check was written for. **Fix:** the counting loop was extracted to `observability.citation_integrity` (one definition), `_citation_failure` became public `citation_failure`, the release gate now calls the shared counter, and `rebuild_index._gate_validator` folds the counts into the verdict it returns — so `build_index` refuses the promotion through the path it already had. **Evidence:** 4 new tests incl. a rebuild refused with one uncited answer and one with an incomplete citation; reverting the fold-in fails 4. `release_gate.py --no-browser` re-run: 70/70, 55 grounded, 0 uncited, 0 incomplete — unchanged | `observability.py` (`citation_integrity`, `citation_failure`) · `rebuild_index.py:49-88` · `release_gate.py:106-117` | §8.24's claim is now true of a promotion as well as of a gate run |
+| 8.34 | ✅ **Resolved 2026-10-10.** **The janitor's summary retry could not repair the case it exists for.** It summarised only conversations still in `registry._by_key`, so in a process that had just started — when that map is empty — every id `unsummarised_closed` returned was filtered to nothing and the row stayed unsummarised for good. It also missed the rows `sweep_idle` closes for conversations this process never held — the exact case. **Fix:** `ConversationRegistry.from_store(id)` rebuilds one conversation from its own rows whatever its state (the *record* path, where `recover` is the lookup path), and `_load_all_turns` fills every turn with its classification and channel — `_seed_context` keeps only the tail because it feeds a prompt, and a summary is a record that must not under-report. `retry_summaries` falls back to it, and a new `registry.by_id` replaces the two hand-rolled `_by_key` scans. **Evidence:** 4 new tests — a restart summarising what the old process could not, a rebuilt summary counting all 12 turns rather than the 6-turn context tail, an unknown id being a miss not an error, and an unreadable classification not losing the turn. Reverting the fallback fails 1 | `orchestrator.py` (`by_id`, `from_store`, `_load_all_turns`, `retry_summaries`, `sweep_idle`) | A summary lost to a restart is now recoverable, which is what `summary_for`'s docstring always claimed |
+| 8.35 | ✅ **Resolved 2026-10-10.** **US-030's "a refused boot leaves no artifact behind" was narrower than the story.** `boot.write_report` suppressed the report only when the **ISOLATION** phase failed, so a refusal from AUDIT, SECRETS, DATA or INDEX still wrote `logs/anita/preflight.json` into the directory it had just refused to boot in. **Fix:** the suppression is `if not report.ok` — every refusal, not just the one the acceptance test demonstrates. **Evidence:** 2 new tests — a non-isolation refusal writing nothing, and a clean boot still writing its report (so the suppression is about refusals, not shyness); reverting fails 1 | `boot.py:370-393` | The claim now holds generally |
+| 8.36 | ✅ **Resolved 2026-10-10.** **Two runtime artefacts were tracked in git.** `platform/logs/anita_crm.sqlite` (the live CRM database) and `platform/logs/anita/preflight.json` — the latter still asserting `"25 key(s) live, 16 pending (modules not yet built)"` from the first commit, contradicting the current `43 live · 5 pending`. **Fix:** both `git rm --cached` (the files stay on disk), now ignored by the `logs/` rule `platform/.gitignore` already carried; and `platform/README.md`'s stale "1156 tests" corrected to the current figure. **Evidence:** `git check-ignore` confirms both paths are ignored and `git status` is clean of them — the tree no longer dirties on every run | `platform/logs/` · `platform/README.md:31` | The permanent `M` in every `git status` is gone, and no committed report contradicts the code |
 
 ### Documentation defects
 
-**Sixth pass: all five re-verified still open. Seventh pass: one was stale — §8.15 is fixed** (the
-runbook section is now "What still needs a real call" and states TAC-6/AC-7 are implemented; §9
-already recorded it as done, so the tracker contradicted itself and the table was the wrong half).
-The remaining four are genuinely still open documents: each one makes a document contradict the code
+**Sixth pass: all five re-verified still open. Seventh pass: all five are now resolved** — §8.13,
+§8.14, §8.16 and §8.17 by the stale-document commit (`a81f54e`), and §8.15, the last one, was the
+table being the wrong half: the runbook had already been rewritten to "What still needs a real call"
+and §9 already recorded it as done. Each one removed a place where a document contradicted the code
 it describes.
 
 | # | Defect | Where |
@@ -842,21 +859,25 @@ The full plan — per-story work, exit criteria, sizes, risks — is `completion
 
 ### Everything still open, in one list
 
-Updated 2026-10-10 (seventh pass, same day as the fix). **The sixth pass's closing line — "not one of
+Updated 2026-10-10 (seventh pass, same day as the fixes). **The sixth pass's closing line — "not one of
 them is something an agent can finish alone" — is no longer true**, and the seventh pass proved it:
-§8.30 and §8.31 were both unblocked code, and both are now closed with reproductions.
+all seven of its defects were unblocked code, and all seven are closed with reproductions.
 
 | # | Item | Waiting on | Who |
 |---|---|---|---|
 | 1 | ~~**§8.30 — wire the barge-in trigger**~~ | ✅ **Done 2026-10-10.** Both relays arm and close the engine's SPEAKING window; the flag lifecycle is consumed where it is read. US-017 restored to `COMPLETED` | — |
 | 2 | ~~**§8.31 — move the media-stream gate onto the frame path**~~ | ✅ **Done 2026-10-10.** `media before start` is refused; the §8.6 invariant is now whole | — |
-| 3 | **§8.33–§8.36** — citation check at promotion, summary-retry scope, the US-030 artifact claim, and the two tracked runtime artefacts | nothing — **agent-doable**, lower severity | **Me** |
+| 3 | ~~**§8.32–§8.36**~~ | ✅ **All five done 2026-10-10.** Terminal-only slot release; the citation rule shared with the promotion path; the summary retry rebuilt from the store; no report on any refusal; both runtime artefacts untracked and the README count corrected | — |
 | 4 | **US-001's real carrier call** — the handset half of `T-01…T-17`, a real CallSid in `inbound_event`, the timing budgets on a real network, and **the barge-in thresholds on a real handset and echo path** (§8.30's residual) | a phone, the Twilio console, and a decision to open the public tunnel | **You** |
 | 5 | **US-021 outbound worker** | DG-08 legal review | Blocked |
 | 6 | **CR-02 Postgres + Docker** | decisions Q9–Q12 (§5) | Blocked |
 | 7 | **DG-08 legal review** of the clinical-refusal wording | a lawyer. Blocks public launch | **You** |
 | 8 | **U-1 / U-2 / U-3** — three product questions (§6) | your answers | **You** |
-| — | Housekeeping: set `SMTP_*` in the deployment (a value, not code) · the chroma probe dirs are already ignored | deployment values | you |
+| — | Housekeeping: set `SMTP_*` in the deployment (a value, not code) | deployment values | you |
+
+**Nothing in this table is an engineering task any more.** Every defect the audit produced is closed;
+what remains is one acceptance run that needs a handset, two builds blocked on decisions, and four
+answers.
 
 #### Carrier-free acceptance — 15/15, run 2026-10-04
 
@@ -910,10 +931,9 @@ opens this box (Twilio credentials, admin endpoints) to the internet, so it shou
 the duration of a test.
 
 **Every defect in the sixth pass's register (§8.1–§8.29) is resolved, and every document that
-contradicted the code has been rewritten. The seventh pass added seven (§8.30–§8.36); §8.30 and
-§8.31 are now fixed and §8.32–§8.36 remain open** — all five are code an agent can close without a
-decision. What remains beyond them is one acceptance run, two blocked builds, and three questions
-that need a person.
+contradicted the code has been rewritten. The seventh pass added seven (§8.30–§8.36), and all seven
+are now fixed** — US-017 restored, the WS gate made whole, and the five follow-ups closed. What
+remains is one acceptance run, two blocked builds, and three questions that need a person.
 
 | Batch | Stories | Done when |
 |---|---|---|
@@ -1005,10 +1025,10 @@ Still open — one needs a value only you have, the rest is code:
 - ~~**A GPU that the app is not using.**~~ ✅ **Done 2026-10-04.** This machine has an **NVIDIA
   RTX 5060 Ti, 16 GB** and was running as a CPU host because `torch` was absent. It now runs on the
   GPU — see the note below for what that took and what it changed.
-- **Two tracked runtime artefacts (§8.36, new seventh pass).** `platform/logs/anita_crm.sqlite` and
-  `platform/logs/anita/preflight.json` are both committed; the first dirties on every run and the
-  second still asserts `25 keys live, 16 pending (modules not yet built)` from the first commit.
-  `git rm --cached` both, gitignore them, and correct `platform/README.md`'s "1156 tests".
+- ~~**Two tracked runtime artefacts (§8.36).**~~ ✅ **Done 2026-10-10.** `platform/logs/anita_crm.sqlite`
+  and `platform/logs/anita/preflight.json` are `git rm --cached` and covered by the `logs/` rule
+  `platform/.gitignore` already carried, so the tree no longer dirties on every run and no committed
+  report contradicts the code. `platform/README.md`'s stale test count is corrected (1156 → 1194).
 - **§10 — the university-domain cleanup tasks**: all CL-1…CL-11 done; nothing outstanding.
 
 **Commit state (seventh pass, 2026-10-10):** every code change described in this file is committed
@@ -1021,10 +1041,12 @@ record (`231e155`), and the chat.html ticket fix (`085b68f`) — **the sixth pas
 `7be50e9` and was six commits stale, which is why it is written out in full here.** The last commit
 is `085b68f` (2026-10-04).
 
-**Uncommitted at the time of writing (seventh pass, 2026-10-10):** the §8.30/§8.31 fix and its 13
-tests (`voice.py`, `media_stream.py`, `browser_voice.py`, `test_mod01_media_stream.py`,
-`test_mod01_browser_voice.py`, `test_mod05_voice_migration.py`), three SDLC documents, and the
-runtime `platform/logs/anita_crm.sqlite` that every run dirties (§8.36).
+**Uncommitted at the time of writing (seventh pass, 2026-10-10):** the §8.30–§8.36 fixes and their
+31 tests (`voice.py`, `media_stream.py`, `browser_voice.py`, `voice_webhook.py`, `orchestrator.py`,
+`observability.py`, `boot.py`, `rebuild_index.py`, `release_gate.py`, and six test files), the
+untracking of the two runtime artefacts, `platform/README.md`'s count, and three SDLC documents.
+`git status` is otherwise **clean** — for the first time in this build, because §8.36 removed the
+runtime database that used to show as modified after every run.
 
 **Working tree otherwise:** `docs/sdlc/status-report.html` — the stakeholder-facing status page, a
 derived artefact, still untracked and now stale against this file. The branch is still named

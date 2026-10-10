@@ -106,13 +106,17 @@ Continue the D4 migration in the planned order:
 2. ~~MOD-02 + MOD-01 text channels~~ — **done** (US-002…US-006), including the `DG-06` hardening.
 3. ~~MOD-05 voice, then MOD-06/07, then MOD-08/10~~ — **done.** All ten modules are built; see `work-status.md` §3 for per-story status.
 
-**What is actually next is not migration work, and the 2026-10-10 pass proved it is no longer only
-other people's work.** The seventh pass found that US-017's barge-in had no live trigger
-(`voice.py mark_speaking()` had no caller — `work-status.md` §8.30) and that the media-stream gate
-guarded the `start` event rather than the frame path (§8.31). **Both were fixed the same day**, with
-reproductions that fail without them; US-017 is back to `COMPLETED` and the §8.6 invariant is whole.
-The remaining agent-doable work is `§8.32–§8.36`. Beyond that: US-001's real carrier call (yours,
-and the run that confirms §8.30's thresholds on a real echo path), and the items blocked on people
-(`DG-08`, `CR-02`'s Q9–Q12, `U-1…U-3`). `work-status.md` §9 lists them in one table.
+**What is actually next is not migration work, and the 2026-10-10 pass proved it is not other
+people's work either.** The seventh pass found seven defects — US-017's barge-in had no live trigger
+(`mark_speaking()` had no caller, §8.30), the media-stream gate guarded the `start` event rather than
+the frame path (§8.31), the status callback released the admission slot on any status (§8.32),
+citation integrity could not refuse an index promotion (§8.33), the summary retry could not reach a
+conversation the process had not held (§8.34), a non-isolation refusal still wrote a boot report
+(§8.35), and two runtime artefacts were tracked in git (§8.36). **All seven were fixed the same
+day**, each with a reproduction that fails without it; US-017 is back to `COMPLETED` and the tree is
+clean for the first time. **No engineering item is open.** What remains is one acceptance run that
+needs a handset (US-001's real carrier call, which also confirms §8.30's thresholds on a real echo
+path) and the items blocked on people (`DG-08`, `CR-02`'s Q9–Q12, `U-1…U-3`). `work-status.md` §9
+lists them in one table.
 
 Two items remain **blocking for public launch** and must have an owner before go-live: `DG-06` (auth, rate limiting, Twilio webhook signature validation — code and config now complete, awaiting only the real-call confirmation) and `DG-08` (legal review of clinical-refusal wording).

@@ -123,7 +123,7 @@ Both are recorded as blocking gaps with a named owner, not as covered work.
 | G7 | Architecture traceable | ✓ | `06-architecture.md` §3 gives every `MOD-xx` a component flow; §5 gives every `MOD-xx` a scale profile with a named bottleneck and degradation mode |
 | G8 | Stories traceable | ✓ | 30/30 stories cite `MOD-xx` plus at least one of `UC-xx`/`TRD-xx`/`BRD-xx` |
 | G9 | Tests traceable | ✓ | §2 story→test mapping filled; 30/30 stories carry LLD test scenarios; 13 carry load scenarios |
-| G10 | Final semantic validation PASS | ✓ | Validator: **1061 passed / 0 failed**; scorecard Overall: PASS |
+| G10 | Final semantic validation PASS | ✓ | Validator: **1061 passed / 0 failed** at this stage's freeze; **1207 passed / 0 failed** re-run 2026-10-10 (the count tracks the tree; the same 10 failures the re-run found — `work-status.md` re-defining `MOD-xx` as headings — are fixed). Scorecard Overall: PASS |
 
 ## 5. Final Status
 

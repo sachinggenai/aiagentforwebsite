@@ -111,6 +111,9 @@ class FakeEngineSession:
         self._dialogue = dialogue
         self.traces = []
         self.call_id = ""
+        self.mark_speaking_calls = 0
+        self.note_playback_calls = 0
+        self.end_turn_calls = 0
 
     def feed_audio(self, frame: bytes) -> bool:
         self.frames_seen += 1
@@ -134,6 +137,18 @@ class FakeEngineSession:
 
     def note_answer_truncated(self):
         pass
+
+    # §8.30: the relay arms the engine's SPEAKING window through these. Recorded
+    # here so the wiring is visible at all — with no caller for `mark_speaking`
+    # the barge-in gate answers FRAME_LISTENING for every frame.
+    def mark_speaking(self, chunks=None):
+        self.mark_speaking_calls += 1
+
+    def note_playback(self, frames=None):
+        self.note_playback_calls += 1
+
+    def end_turn(self):
+        self.end_turn_calls += 1
 
 
 def _relay(session=None, admission=None, store=None, limiter=None):
@@ -191,6 +206,27 @@ class TestTheRelay:
         assert base64.b64decode(audio["ulaw_b64"]) == b"\x22" * 160
         roles = [frame["role"] for frame in sent if frame["type"] == "transcript"]
         assert roles == ["caller", "assistant"]
+
+    def test_a_turn_arms_and_closes_the_engines_speaking_window(self):
+        """§8.30 on the browser path: the page's playback queue is the analogue
+        of Twilio's playout buffer, so the engine must be told it is speaking
+        here too. The `flush` on a barge-in and the truncation mark both hang
+        off the verdict this window makes reachable."""
+        session = FakeEngineSession(end_after=1)
+        relay, _ = _relay(session)
+        asyncio.run(relay.handle_message(json.dumps({"type": "start"})))
+        asyncio.run(relay.handle_message(_audio_frame()))
+
+        async def settle():
+            await asyncio.sleep(0)
+            if relay._turn is not None:
+                await relay._turn
+
+        asyncio.run(settle())
+
+        assert session.mark_speaking_calls == 1, "the gate was never armed"
+        assert session.end_turn_calls == 1, "the window was left open"
+        assert relay._playback_open is False
 
     def test_commit_forces_a_turn_without_a_vad_boundary(self):
         """The MediaRecorder fallback sends the whole utterance at once; there

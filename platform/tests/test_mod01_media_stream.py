@@ -72,6 +72,22 @@ class FakeSession:
         self.admitted = 0
         self.processed = 0
         self.truncated_marks = 0
+        # §8.30: the relay arms the barge-in gate through these. Recorded on the
+        # fake so a test can see the wiring at all — the real session's gate is
+        # inert unless someone calls `mark_speaking`, which is the defect these
+        # exist to catch.
+        self.mark_speaking_calls: list[list[bytes]] = []
+        self.note_playback_calls: list[list[bytes]] = []
+        self.end_turn_calls = 0
+
+    def mark_speaking(self, chunks=None) -> None:
+        self.mark_speaking_calls.append(list(chunks or []))
+
+    def note_playback(self, frames=None) -> None:
+        self.note_playback_calls.append(list(frames or []))
+
+    def end_turn(self) -> None:
+        self.end_turn_calls += 1
 
     def note_answer_truncated(self) -> None:
         self.truncated_marks += 1
@@ -504,6 +520,34 @@ class TestTheStreamIsAdmitted:
         assert session.frames_seen == 1
         assert _media_events(sent), "the answer must still come back"
 
+    def test_media_frames_without_a_start_are_refused(self):
+        """§8.31: the gate runs in `_on_start`, because that is where the token
+        and the call id arrive. A stream that skips `start` and sends `media`
+        directly would otherwise reach the engine with no identity, no token and
+        no slot — this test fails without the frame-path guard."""
+        session = FakeSession()
+        relay, sent = _relay(session=session)
+        relay.tokens = self._tokens()
+
+        asyncio.run(_drive(relay, [_media(), _media()]))
+
+        assert relay.refused == "media before start"
+        assert session.frames_seen == 0, "an unannounced stream must not drive the engine"
+        assert _media_events(sent) == []
+
+    def test_media_without_a_start_is_refused_even_with_no_gate_wired(self):
+        """The refusal is a protocol rule, not only a security one: without
+        `start` the engine has no call id, so the conversation would be keyed on
+        an empty string. Twilio always sends `start` first, so this refuses
+        nothing legitimate."""
+        session = FakeSession()
+        relay, _ = _relay(session=session)          # no tokens, no admission
+
+        asyncio.run(_drive(relay, [_media()]))
+
+        assert relay.refused == "media before start"
+        assert session.frames_seen == 0
+
     def test_a_refused_stream_cannot_release_a_live_calls_slot(self):
         """The forgery this closes: name a live call on a socket you opened
         without a token, then disconnect — the live call must keep its slot."""
@@ -526,6 +570,159 @@ class TestTheStreamIsAdmitted:
         asyncio.run(_drive(relay, [_start(), _media()]))
         assert relay.refused == ""
         assert session.frames_seen == 1
+
+
+class TestTheBargeInWindowIsArmed:
+    """§8.30 — the relay is what puts the engine into its SPEAKING window.
+
+    Without these calls the gate in `admit_inbound_frame` answers
+    `FRAME_LISTENING` unconditionally, and every consumer of its verdict —
+    `clear_playout`, `note_answer_truncated`, the engine's own cancel signal —
+    is unreachable on a real call. That is the defect: the mechanism was built
+    and tested, and nothing ever called it.
+    """
+
+    def test_a_turn_arms_the_window_and_closes_it(self):
+        session = FakeSession()
+        relay, _ = _relay(session=session)
+
+        asyncio.run(_drive(relay, [_start(), _media()]))
+
+        assert len(session.mark_speaking_calls) == 1, "the gate was never armed"
+        assert session.end_turn_calls == 1, "the window was left open"
+        assert relay._playback_open is False
+
+    def test_the_first_batch_primes_and_the_rest_are_queued(self):
+        """`mark_speaking` primes the echo reference from the audio about to be
+        heard; calling it again would reset the playout clock mid-answer, so
+        only the first batch arms it and later batches are queued."""
+        class TwoBatchSession(FakeSession):
+            async def process_utterance(self, chunk_sink=None):
+                self.processed += 1
+                if chunk_sink is not None:
+                    await chunk_sink(self.audio)
+                    await chunk_sink(self.audio)
+                return self.audio, self.transcript, False
+
+        session = TwoBatchSession()
+        relay, sent = _relay(session=session)
+
+        asyncio.run(_drive(relay, [_start(), _media()]))
+
+        assert len(session.mark_speaking_calls) == 1
+        assert session.mark_speaking_calls[0] == session.audio, "the first batch seeds the reference"
+        assert len(session.note_playback_calls) == 1
+        assert session.note_playback_calls[0] == session.audio
+        # Two batches of two frames: queueing the second must not suppress it.
+        assert len(_media_events(sent)) == 4, "both batches still reach the caller"
+
+    def test_the_window_is_closed_when_the_turn_is_cancelled(self):
+        """A barge-in cancels the turn mid-playback. The engine must still leave
+        SPEAKING, or the caller's ordinary speech is gated as echo for the rest
+        of the call."""
+        class BlockingSession(FakeSession):
+            """Returns the first batch, then waits — so the turn is genuinely
+            in flight, with the window armed, when it is cancelled."""
+
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.hold = asyncio.Event()
+
+            async def process_utterance(self, chunk_sink=None):
+                self.processed += 1
+                await chunk_sink(self.audio)        # this arms the window
+                await self.hold.wait()              # cancelled here
+                return self.audio, self.transcript, False
+
+        session = BlockingSession()
+        relay, _ = _relay(session=session)
+
+        async def scenario():
+            await relay.handle_message(json.dumps(_start()))
+            await relay.handle_message(json.dumps(_media()))
+            await asyncio.sleep(0.01)               # let the turn reach the wait
+            assert relay._playback_open is True, "the turn never armed the window"
+            relay._turn.cancel()
+            try:
+                await relay._turn
+            except asyncio.CancelledError:
+                pass
+
+        asyncio.run(scenario())
+
+        assert session.end_turn_calls == 1
+        assert relay._playback_open is False
+
+    def test_a_caller_speaking_over_the_answer_sets_the_cancel_signal(self):
+        """§8.30 end to end, on the real engine session.
+
+        The relay arms the window when the first batch reaches the socket; from
+        then on a caller talking over the answer must set the engine's own
+        cancel signal. Before the fix this assertion was impossible: nothing
+        called `mark_speaking`, so `admit_inbound_frame` answered
+        FRAME_LISTENING for every frame and the caller was merely buffered and
+        answered afterwards. The existing barge-in tests below reach the same
+        branch by stubbing the verdict and forcing `_speaking`, which is exactly
+        why none of them could see it — this one stubs neither.
+        """
+        from anita import voice as engine
+
+        session = engine.VoiceCallSession()
+        # Silence outbound, so the echo reference sits at the absolute floor and
+        # the caller's speech is judged on its own level, not against our voice.
+        answer = [b"\xff" * 160] * 2
+
+        async def speak_and_hold(chunk_sink=None):
+            # `begin_turn` is what the real `process_utterance` does first, and
+            # it is what mints the turn's cancel signal — the thing the gate
+            # sets. A stub that skipped it would prove nothing.
+            session.begin_turn()
+            await chunk_sink(answer)        # this is what arms the gate
+            await asyncio.sleep(0.05)       # ... and this is the answer playing
+            return answer, "", False
+
+        session.process_utterance = speak_and_hold
+        relay, _ = _relay(session=session)
+
+        async def scenario():
+            await relay.handle_message(json.dumps(_start()))
+            # Started directly: the real engine's VAD needs 600 ms of silence to
+            # close an utterance, and what is under test here is the playback
+            # window, not endpointing.
+            relay._begin_turn()
+            await asyncio.sleep(0.01)
+            assert session.state == engine.STATE_SPEAKING, "the window was never armed"
+
+            # µ-law 0x00 is full scale (0xff is silence) — the caller talks.
+            for _ in range(engine.BARGE_IN_MIN_FRAMES):
+                await relay.handle_message(json.dumps(_media(_audio_frame(0x00))))
+            assert session.cancel_requested() is True, "the caller could not interrupt"
+
+            relay._turn.cancel()
+            try:
+                await relay._turn
+            except asyncio.CancelledError:
+                pass
+
+        asyncio.run(scenario())
+
+        assert session.state == engine.STATE_LISTENING, "the window was left open"
+
+    def test_a_turn_that_produces_no_audio_never_opens_the_window(self):
+        """A sign-off with no speech, or a decline that returns no frames, must
+        not leave the gate armed against a silent line."""
+        class SilentSession(FakeSession):
+            async def process_utterance(self, chunk_sink=None):
+                self.processed += 1
+                return [], "bye", True
+
+        session = SilentSession()
+        relay, _ = _relay(session=session)
+
+        asyncio.run(_drive(relay, [_start(), _media()]))
+
+        assert session.mark_speaking_calls == []
+        assert session.end_turn_calls == 0
 
 
 class TestTheSessionRow:

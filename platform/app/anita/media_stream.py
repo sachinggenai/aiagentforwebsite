@@ -94,6 +94,14 @@ class TwilioMediaStream:
         # did, `process_utterance` still returns the same frames (that is its
         # batch contract) and sending them again would speak every clause twice.
         self._streamed = False
+        # §8.30: whether this turn has put the engine into its SPEAKING window.
+        # The gate that decides barge-in is armed by `mark_speaking`, which is
+        # called on the FIRST batch actually written to the socket — the moment
+        # the carrier starts playing us out — and left by `end_turn` when the
+        # turn ends. Keeping it here rather than at the top of `_run_turn` is
+        # the point: a turn that has produced no audio yet is silence from the
+        # caller's side, and nothing in it is theirs to interrupt.
+        self._playback_open = False
 
         self.transcript: list[str] = []
 
@@ -208,6 +216,18 @@ class TwilioMediaStream:
             # stream ended. Feeding them would append audio to a conversation
             # that has been closed and whose slot is already released.
             return
+        if not self._started:
+            # §8.31: the admission gate runs in `_on_start`, because that is
+            # where the token and the call id arrive. A stream that skips
+            # `start` and goes straight to media would therefore never be
+            # checked at all, and would reach `feed_audio` with no identity, no
+            # token and no slot — driving STT (and TTS) on a public socket.
+            # Twilio always sends `start` first, so nothing legitimate is
+            # refused by requiring it; the socket is closed 1008 by the receive
+            # loop, and `close` releases nothing because this sets `refused`.
+            self.refused = "media before start"
+            logger.warning("media stream: refused (%s)", self.refused)
+            return
         # TAC-6. Frames are the only thing arriving on a call where nothing is
         # happening, so this is the one place the ceiling can be noticed during
         # silence — and a call that never reaches end-of-speech is exactly the
@@ -314,6 +334,16 @@ class TwilioMediaStream:
             logger.exception("media stream: turn failed")
         finally:
             self._speaking = False
+            # §8.30: leave the engine's SPEAKING window on every exit path —
+            # answered, cancelled by a barge-in, failed, or torn down mid-turn.
+            # A session left in SPEAKING would gate the caller's ordinary
+            # speech as echo for the rest of the call. Only closed if this turn
+            # opened it: a turn that produced no audio never armed the gate.
+            if self._playback_open:
+                self._playback_open = False
+                end = getattr(self.session, "end_turn", None)
+                if end is not None:
+                    end()
             # US-025: emit the turn's trace however it ended. `getattr` because
             # tests drive this relay with a fake session that has no engine.
             finish = getattr(self.session, "finish_trace", None)
@@ -327,7 +357,29 @@ class TwilioMediaStream:
 
     # -- audio out ---------------------------------------------------------
     async def send_frames(self, frames: list[bytes]) -> None:
-        """Base64 each frame to Twilio, with a `mark` for flow control."""
+        """Base64 each frame to Twilio, with a `mark` for flow control.
+
+        §8.30: this is the single choke point every outbound frame passes
+        through, so it is where the engine is told it is speaking. The first
+        batch of a turn arms the barge-in gate (`mark_speaking` enters
+        SPEAKING and primes the echo reference from the audio about to be
+        heard); every later batch is only queued on the playout clock. Without
+        this the gate is never armed, `admit_inbound_frame` answers
+        FRAME_LISTENING unconditionally, and a caller talking over the
+        assistant is merely buffered and answered afterwards.
+        """
+        if not frames:
+            return
+        if self._playback_open:
+            note = getattr(self.session, "note_playback", None)
+            if note is not None:
+                note(frames)
+        else:
+            self._playback_open = True
+            mark = getattr(self.session, "mark_speaking", None)
+            if mark is not None:
+                mark(frames)
+
         for frame in frames:
             if self._closed:
                 return

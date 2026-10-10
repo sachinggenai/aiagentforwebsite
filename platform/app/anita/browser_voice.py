@@ -210,6 +210,10 @@ class BrowserVoiceSession:
         self._turn: asyncio.Task | None = None
         self._speaking = False
         self._streamed = False
+        # §8.30: whether the engine has been put into its SPEAKING window by
+        # this turn — see `send_frames`. Set when the first batch reaches the
+        # buyer's playback queue, cleared when the turn ends.
+        self._playback_open = False
         self._pcm_buffer = b""
         self.transcript: list[str] = []
 
@@ -391,6 +395,14 @@ class BrowserVoiceSession:
             await self._send({"type": "error", "code": "turn_failed"})
         finally:
             self._speaking = False
+            # §8.30: leave the engine's SPEAKING window on every exit path, for
+            # the same reason the PSTN relay does — an unclosed window gates the
+            # buyer's ordinary speech as echo for the rest of the session.
+            if self._playback_open:
+                self._playback_open = False
+                end = getattr(self.session, "end_turn", None)
+                if end is not None:
+                    end()
             finish = getattr(self.session, "finish_trace", None)
             if finish is not None:
                 finish(outcome=outcome)
@@ -400,6 +412,27 @@ class BrowserVoiceSession:
         await self.send_frames(frames)
 
     async def send_frames(self, frames: list[bytes]) -> None:
+        """Hand µ-law frames to the page's playback queue.
+
+        §8.30: the browser's queue is the analogue of Twilio's playout buffer,
+        so this is where the engine is told it is speaking. The first batch
+        arms the barge-in gate and primes the echo reference; later batches are
+        only queued on the playout clock. `admit_inbound_frame` also feeds the
+        `flush` on `FRAME_INTERRUPTION`, so without this the page keeps playing
+        the interrupted answer out of its own queue.
+        """
+        if not frames:
+            return
+        if self._playback_open:
+            note = getattr(self.session, "note_playback", None)
+            if note is not None:
+                note(frames)
+        else:
+            self._playback_open = True
+            mark = getattr(self.session, "mark_speaking", None)
+            if mark is not None:
+                mark(frames)
+
         for frame in frames:
             if self._closed:
                 return

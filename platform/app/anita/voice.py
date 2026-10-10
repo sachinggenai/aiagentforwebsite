@@ -853,9 +853,22 @@ class VoiceCallSession:
         return self._cancel is not None and self._cancel.is_set()
 
     def end_turn(self) -> None:
-        """Close the turn. Does NOT clear the caller's audio buffer."""
+        """Close the turn. Does NOT clear the caller's audio buffer.
+
+        Called by the transport on every exit path from a turn (`_run_turn`'s
+        `finally`), where `mark_listening` alone would leave the turn's cancel
+        signal standing: `begin_turn` mints a fresh Event, but a caller that
+        never reaches it (a dropped socket mid-turn) would leave `_cancel` set
+        and the next `cancel_requested()` would read a stale interruption.
+
+        Deliberately does NOT clear `_turn_began_as_interruption`. The gate sets
+        that while the interrupted turn is still playing out, and the NEXT
+        turn's `process_utterance` is what reads it — clearing it here erases
+        the only record that the caller spoke over the answer, and the
+        interrupting utterance then loses its lowered min-burst floor. It is
+        consumed exactly once, where it is read (see `process_utterance`).
+        """
         self._cancel = None
-        self._turn_began_as_interruption = False
         self.mark_listening()
 
     def note_answer_truncated(self) -> None:
@@ -1242,8 +1255,18 @@ class VoiceCallSession:
 
         self._turn += 1
         self.begin_turn()
+        # US-017/§8.30: the gate sets this while the PREVIOUS turn was still
+        # playing out; it is consumed here, exactly once, because this is the
+        # utterance the caller interrupted with. Two ways to get it wrong, both
+        # closed: clearing it when the interrupted turn ends erases the record
+        # before this line can read it (the transport's teardown runs first),
+        # and never clearing it holds every later utterance on the call to the
+        # interruption floor. A turn that carries no audio returns above and
+        # deliberately leaves the flag standing for the utterance that follows.
+        began_as_interruption = self._turn_began_as_interruption
+        self._turn_began_as_interruption = False
         self.log_event("UTTERANCE_PROCESSING", frames=self._total_frames,
-                       barge_in=self._turn_began_as_interruption)
+                       barge_in=began_as_interruption)
 
         # ── Min-burst filter: drop sub-300ms noise bursts before STT ──
         # US-014: an admitted interruption is held to a lower floor. The 300 ms
@@ -1254,7 +1277,7 @@ class VoiceCallSession:
         # interrupted to make ("stop", "wait", "no -- "), which is the failure
         # this story exists to fix. This is NOT a second end-of-turn decision:
         # BRD-04 still closes the turn, at 600 ms, exactly once (TAC-5).
-        floor = (BARGE_IN_MIN_FRAMES if self._turn_began_as_interruption
+        floor = (BARGE_IN_MIN_FRAMES if began_as_interruption
                  else MIN_UTTERANCE_FRAMES)
         if self._total_frames < floor:
             logger.info(

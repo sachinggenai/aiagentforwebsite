@@ -1094,6 +1094,110 @@ class TestUS017BargeInStopsTheAnswer:
         assert chunks, "the retry's audio is kept"
 
 
+class TestUS017BargeInWindowLifecycle:
+    """§8.30 — the interruption flag is consumed where it is read, exactly once.
+
+    The gate sets `_turn_began_as_interruption` while the interrupted turn is
+    still playing out; the NEXT utterance is what reads it, to decide its
+    min-burst floor. Two ways to get the lifecycle wrong, both closed here:
+    clearing it when the interrupted turn ends erases the record before the
+    next utterance can read it (the relay's teardown runs first), and never
+    clearing it holds every later utterance on the call to the interruption
+    floor. Before this change the flag was never cleared at all, because the
+    only code that cleared it had no caller.
+    """
+
+    def _session(self, frames):
+        import numpy as np
+
+        from anita import voice
+
+        session = voice.VoiceCallSession()
+        session._audio_buffer = [b"\xff" * 160] * frames
+        session._total_frames = frames
+
+        async def fake_transcribe(audio):
+            return "bye", False
+
+        async def fake_synthesise(text):
+            return np.zeros(24000, dtype=np.float32)
+
+        session._transcribe = fake_transcribe
+        session._synthesise = fake_synthesise
+        return session
+
+    def test_an_interrupting_utterance_is_held_to_the_lower_floor(self):
+        """The caller who interrupted to say "stop" must not have that word
+        discarded as a sub-300 ms noise burst."""
+        import asyncio
+
+        from anita import voice
+
+        session = self._session(voice.BARGE_IN_MIN_FRAMES)
+        session._turn_began_as_interruption = True
+
+        _, dialogue, _ = asyncio.run(session.process_utterance())
+
+        assert dialogue, "the interrupting utterance was dropped as noise"
+
+    def test_the_same_audio_is_noise_when_it_did_not_interrupt(self):
+        import asyncio
+
+        from anita import voice
+
+        session = self._session(voice.BARGE_IN_MIN_FRAMES)
+
+        _, dialogue, _ = asyncio.run(session.process_utterance())
+
+        assert dialogue == ""
+
+    def test_the_flag_is_consumed_once_and_does_not_leak(self):
+        """One interruption lowers the floor for the interrupting utterance
+        only — not for the rest of the call."""
+        import asyncio
+
+        from anita import voice
+
+        session = self._session(voice.BARGE_IN_MIN_FRAMES)
+        session._turn_began_as_interruption = True
+
+        asyncio.run(session.process_utterance())
+        assert session._turn_began_as_interruption is False, "the flag was not consumed"
+
+        session._audio_buffer = [b"\xff" * 160] * voice.BARGE_IN_MIN_FRAMES
+        session._total_frames = voice.BARGE_IN_MIN_FRAMES
+        _, dialogue, _ = asyncio.run(session.process_utterance())
+
+        assert dialogue == "", "the interruption floor leaked into a later turn"
+
+    def test_closing_the_turn_does_not_erase_the_flag(self):
+        """`end_turn` is called by the transport's teardown, which runs before
+        the next utterance is read — so it must leave the flag standing."""
+        from anita import voice
+
+        session = voice.VoiceCallSession()
+        session._turn_began_as_interruption = True
+
+        session.end_turn()
+
+        assert session._turn_began_as_interruption is True, (
+            "closing the interrupted turn erased the record the next turn reads"
+        )
+
+    def test_closing_the_turn_drops_the_cancel_signal(self):
+        """A stale Event would cancel the next turn the moment it started."""
+        from anita import voice
+
+        session = voice.VoiceCallSession()
+        session.begin_turn()
+        session.request_interruption()
+        assert session.cancel_requested() is True
+
+        session.end_turn()
+
+        assert session.cancel_requested() is False
+
+
 class TestUS017TruncationMarker:
     """AC-2: the transcript records that the answer was cut short — on the
     batch path only, where the history holds the full composed answer."""

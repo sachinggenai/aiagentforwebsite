@@ -902,6 +902,7 @@ class TestUS027RebuildEntryPoint:
 
         class FakeGate:
             set_sha256 = "x"
+            cases: list = []
 
             def evaluate(self, answerer):
                 return SimpleNamespace(as_dict=lambda: {"passed": True, "reason": "ok"})
@@ -912,9 +913,96 @@ class TestUS027RebuildEntryPoint:
         validator = self._module()._gate_validator(
             chat=FakeChat(), gate=FakeGate(), retriever=object()
         )
-        assert validator(SimpleNamespace(collection="anita_ams__v2")) == {
-            "passed": True, "reason": "ok"
-        }
+        result = validator(SimpleNamespace(collection="anita_ams__v2"))
+
+        assert result["passed"] is True
+        assert result["reason"] == "ok"
+        # §8.33: the verdict carries provenance, not just the gate's text
+        # assertions — an empty set means nothing was uncited.
+        assert result["citations"] == {"grounded": 0, "uncited": 0, "incomplete": 0}
+
+    def _rebuild_with(self, bodies):
+        """Drive `_gate_validator` over a set whose answers are `bodies`."""
+        from types import SimpleNamespace
+
+        class FakeRetriever:
+            collection = "anita_ams__v2"
+
+            def for_collection(self, name):
+                return self
+
+        class FakeChat:
+            retriever = FakeRetriever()
+
+            def post_message(self, *, message, session_id):
+                return SimpleNamespace(body=bodies[message])
+
+        class FakeGate:
+            set_sha256 = "x"
+            cases = [SimpleNamespace(question=q, case_id=str(i))
+                     for i, q in enumerate(bodies)]
+
+            def evaluate(self, answerer):
+                for case in self.cases:
+                    answerer(case)
+                return SimpleNamespace(as_dict=lambda: {"passed": True, "reason": "all passed"})
+
+        validator = self._module()._gate_validator(
+            chat=FakeChat(), gate=FakeGate(), retriever=FakeRetriever()
+        )
+        return validator(SimpleNamespace(collection="anita_ams__v2"))
+
+    def test_a_rebuild_is_refused_when_a_grounded_answer_is_uncited(self):
+        """§8.33: `rebuild_index.py` validated through `QualityGate` alone, which
+        sees answer text and never provenance — so an index could be promoted
+        while uncited answers existed, the one moment the citation rule was
+        written for. The check now travels with this verdict."""
+        result = self._rebuild_with({
+            "q0": {"text": "a price", "grounded": True, "grounded_on": [{"chunk_id": "c1"}]},
+            "q1": {"text": "an answer with no citation", "grounded": True, "grounded_on": []},
+        })
+
+        assert result["passed"] is False
+        assert "citation integrity failed" in result["reason"]
+        assert result["citations"]["uncited"] == 1
+
+    def test_a_rebuild_is_refused_when_a_citation_could_not_be_completed(self):
+        result = self._rebuild_with({
+            "q0": {"text": "a price", "grounded": True, "grounded_on": [{"chunk_id": "c1"}],
+                   "citation_incomplete": True},
+        })
+
+        assert result["passed"] is False
+        assert result["citations"]["incomplete"] == 1
+
+    def test_a_fully_cited_rebuild_still_passes(self):
+        result = self._rebuild_with({
+            "q0": {"text": "a price", "grounded": True, "grounded_on": [{"chunk_id": "c1"}]},
+            "q1": {"text": "a refusal", "grounded": False},
+        })
+
+        assert result["passed"] is True
+        assert result["citations"] == {"grounded": 1, "uncited": 0, "incomplete": 0}
+
+    def test_the_two_paths_run_the_same_citation_check(self):
+        """One definition, two callers. A second copy of the rule is a second
+        place for it to drift, which is how the promotion path came to be
+        missing it in the first place."""
+        import importlib.util
+        import inspect
+
+        from anita import observability
+
+        path = PLATFORM / "scripts" / "release_gate.py"
+        spec = importlib.util.spec_from_file_location("release_gate", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        source = inspect.getsource(module.run_evaluation_set)
+        assert "citation_integrity" in source, (
+            "the release gate must use the shared counter, not its own copy"
+        )
+        assert callable(observability.citation_failure)
 
     def test_the_validator_scores_the_staging_collection_and_restores_the_surface(self):
         """US-010: the frozen set must be answered from the collection the build
@@ -951,6 +1039,10 @@ class TestUS027RebuildEntryPoint:
 
         class FakeGate:
             set_sha256 = "x"
+            # §8.33: the validator now runs the citation pass over the set's
+            # cases, so a double for the gate has to carry them like the real
+            # `QualityGate` does.
+            cases: list = []
 
             def evaluate(self, answerer):
                 for i in range(2):

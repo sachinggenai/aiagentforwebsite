@@ -319,6 +319,27 @@ class Conversation:
         }
 
 
+#: How many turns a store rebuild reads per page. Paging rather than one big
+#: `SELECT *` because a long thread is unbounded and a summary is not worth
+#: holding the whole table for.
+_TURN_PAGE_LIMIT = 200
+
+
+def _intent_or_none(value: str | None) -> Intent | None:
+    """`Intent(value)`, or `None` for a label this build does not know.
+
+    A classification written by an earlier version, or by a route since
+    removed, must not make a whole summary fail: the turn is still worth
+    counting even when its label cannot be read back.
+    """
+    if not value:
+        return None
+    try:
+        return Intent(value)
+    except ValueError:
+        return None
+
+
 class QueueFull(Exception):
     """Too many turns are already waiting for this conversation."""
 
@@ -575,11 +596,7 @@ class ConversationRegistry:
                 for conversation_id in self.store.sweep_idle(
                     idle_window_seconds=self.idle_window_seconds
                 ):
-                    known = next(
-                        (c for c in self._by_key.values()
-                         if c.conversation_id == conversation_id),
-                        None,
-                    )
+                    known = self.by_id(conversation_id)
                     if known is not None and known not in closed:
                         known.state = ConversationState.CLOSED
                         closed.append(known)
@@ -678,6 +695,84 @@ class ConversationRegistry:
                     self._by_key[conversation.key] = conversation
                 return conversation
         return None
+
+    def by_id(self, conversation_id: str) -> Conversation | None:
+        """The live object for one conversation id, if this process holds it.
+
+        `_by_key` is keyed by identity, so a caller that already has an id —
+        the janitor's pending list, most of all — had to scan the map itself.
+        """
+        with self._lock:
+            return next(
+                (conversation for conversation in self._by_key.values()
+                 if conversation.conversation_id == conversation_id),
+                None,
+            )
+
+    def from_store(self, conversation_id: str) -> Conversation | None:
+        """Rebuild one conversation from its own rows, by id, whatever its state.
+
+        `recover` is the *lookup* path: it finds a thread by identity and
+        deliberately refuses a closed one. This is the *record* path — it takes
+        an id the store already handed us and reconstructs the conversation well
+        enough to summarise it, which is the one thing `summary_for` says a
+        summary has to survive a restart for. Before this existed, a summary
+        lost to a transient failure could only ever be retried by the process
+        that took the call (§8.34).
+        """
+        if self.store is None or not (conversation_id or "").strip():
+            return None
+        try:
+            record = self.store.get_conversation(conversation_id)
+        except Exception:  # noqa: BLE001 - a read failure is a miss, not an error
+            logger.exception("could not read conversation %s", conversation_id[:8])
+            return None
+        if record is None:
+            return None
+        conversation = self._from_record(record)
+        self._load_all_turns(conversation)
+        return conversation
+
+    def _load_all_turns(self, conversation: Conversation) -> None:
+        """Fill `turns` and `channels_seen` from the store — in full, oldest first.
+
+        `_seed_context` deliberately takes only the tail, because it is feeding a
+        prompt and a context budget is the point. A summary is a *record*, so it
+        counts every turn: one rebuilt after a restart that said "6 turns" about
+        a 48-turn conversation would be wrong in exactly the way a record must
+        not be. Each turn keeps its classification for the same reason —
+        `summary_for` names the intents, and dropping them would make the
+        rebuilt payload poorer than the live one it replaces.
+        """
+        if self.store is None:
+            return
+        conversation.turns.clear()
+        conversation.channels_seen.clear()
+        after = 0
+        try:
+            while True:
+                page = self.store.page_turns(
+                    conversation.conversation_id, after_seq=after, limit=_TURN_PAGE_LIMIT
+                )
+                if not page:
+                    break
+                for record in page:
+                    conversation.turns.append(Turn(
+                        role=record.role,
+                        content=record.text,
+                        intent=_intent_or_none(record.classification),
+                        at=record.created_at,
+                        seq=record.seq,
+                        external=True,
+                    ))
+                    if (record.channel_kind
+                            and record.channel_kind not in conversation.channels_seen):
+                        conversation.channels_seen.append(record.channel_kind)
+                after = page[-1].seq
+        except Exception:  # noqa: BLE001 - a partial load still summarises
+            logger.exception(
+                "could not load every turn for %s", conversation.conversation_id[:8]
+            )
 
     def end(self, key: str, *, reason: str = "") -> None:
         self.close(key, reason=reason)
@@ -931,28 +1026,42 @@ class Orchestrator:
         stayed lost, and `unsummarised_closed`, the query that finds them, had
         no caller at all (§8.28).
 
-        Returns how many were **retried**; a retry that fails again is logged
-        and will be picked up on the next tick, because the guard is still
-        unset.
+        Returns how many attempts were **made**; a retry that fails again is
+        logged and picked up on the next tick, because the guard is still unset.
+
+        **§8.34: the retry reads the store, not just memory.** It used to
+        summarise only conversations still in the registry, which after a
+        restart is none of them — so the pending list was read, filtered to
+        nothing, and every row stayed unsummarised for good. It also missed the
+        rows `sweep_idle` closes for conversations this process never held.
+        A conversation not in memory is rebuilt with `from_store`, which is the
+        same path a restart already uses to carry a thread forward.
         """
         store = self.registry.store
         if store is None:
             return 0
         try:
-            pending = set(store.unsummarised_closed(limit=limit))
+            pending = sorted(set(store.unsummarised_closed(limit=limit)))
         except Exception:  # noqa: BLE001 - a read failure is retried next tick
             logger.exception("summary retry: could not read the pending list")
             return 0
         if not pending:
             return 0
-        with self.registry._lock:  # noqa: SLF001 - the registry owns this map
-            candidates = [
-                conversation for conversation in self.registry._by_key.values()
-                if conversation.conversation_id in pending
-            ]
-        for conversation in candidates:
+
+        retried = 0
+        for conversation_id in pending:
+            conversation = self.registry.by_id(conversation_id)
+            if conversation is None:
+                conversation = self.registry.from_store(conversation_id)
+            if conversation is None:
+                # The row went away between the query and the read. Nothing to
+                # summarise, and nothing to warn about.
+                logger.info("summary retry: %s is no longer in the store",
+                            conversation_id[:8])
+                continue
             self.registry._summarise(conversation, reason="retry")  # noqa: SLF001
-        return len(candidates)
+            retried += 1
+        return retried
 
     def expire_transcripts(self, *, retention_days: float, limit: int = 100) -> int:
         """Retention (`DG-11`): drop transcripts past the window, keep the row.

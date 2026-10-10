@@ -106,22 +106,12 @@ def run_evaluation_set() -> tuple[object, dict]:
     # US-012, `TAC-1`/`TAC-2`: a grounded answer with no citation, or a
     # citation that could not be completed, is a composition defect — and the
     # only way to know is to look at every reply the frozen set produced. The
-    # gate above sees text; this sees provenance.
-    integrity = {"grounded": 0, "uncited": 0, "incomplete": 0}
-    try:
-        for case in gate.cases:
-            body = chat.post_message(
-                message=case.question, session_id=f"gate-cite-{case.case_id}"
-            ).body
-            if not body.get("grounded"):
-                continue
-            integrity["grounded"] += 1
-            if not body.get("grounded_on"):
-                integrity["uncited"] += 1
-            if body.get("citation_incomplete"):
-                integrity["incomplete"] += 1
-    except Exception as exc:  # noqa: BLE001 - an integrity run that broke is not a pass
-        integrity["error"] = f"{type(exc).__name__}: {exc}"
+    # gate above sees text; this sees provenance. Shared with the index-promotion
+    # path since §8.33, so a rebuild cannot be promoted on a check the release
+    # gate would have failed.
+    from anita.observability import citation_integrity
+
+    integrity = citation_integrity(chat, gate.cases)
 
     validation = report.as_dict()
     validation["citations"] = integrity

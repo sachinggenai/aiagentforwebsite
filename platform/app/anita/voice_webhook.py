@@ -36,6 +36,21 @@ BUSY_MESSAGE = (
     "Please leave it a moment and call back, or ask us for a callback on the website."
 )
 
+#: Twilio `CallStatus` values that mean the call is over. The slot is released
+#: on these and on nothing else (§8.32): a number configured with progress
+#: callbacks also posts `ringing`/`answered`, and releasing there would free the
+#: slot of a call that is still up.
+TERMINAL_CALL_STATUSES = frozenset({
+    "completed", "busy", "no-answer", "failed", "canceled",
+})
+
+#: The statuses that describe a call still in progress. Kept as a set of its own
+#: so an unrecognised value — a Twilio addition, or a body that is not a status
+#: callback at all — is warned about rather than silently treated as one.
+CALL_PROGRESS_STATUSES = frozenset({
+    "queued", "initiated", "ringing", "in-progress", "answered",
+})
+
 
 def websocket_url(public_base_url: str) -> str:
     """The `wss://` URL of the media stream, derived from the public base URL.
@@ -235,10 +250,12 @@ class VoiceWebhook:
     def status(self, *, params: dict, signature: str | None) -> tuple[int, str, str]:
         """Handle `POST /twilio/status`.
 
-        Twilio reports `completed`, `busy`, `no-answer` and `failed` here. The
-        slot is released on any terminal status, so a call that ends without a
-        clean stream close cannot leak capacity (`SM-04`) — a dropped callback
-        leaves the row alone and `release_stale` reconciles it later.
+        Twilio reports `completed`, `busy`, `no-answer` and `failed` here, but
+        the same URL also carries progress callbacks when a number is configured
+        with them. **The slot is released only on a terminal status** (§8.32) —
+        releasing on `ringing` or `answered` would free the slot of a call that
+        is still up, and the ceiling would quietly stop holding. A call that ends
+        without any callback is still reconciled by `release_stale` (`SM-04`).
         """
         from .channels import SignatureError, validate_twilio_signature
 
@@ -250,7 +267,22 @@ class VoiceWebhook:
 
         call_id = str(params.get("CallSid") or "")
         if self.admission is not None and call_id:
-            self.admission.release(call_id)
+            status = str(params.get("CallStatus") or "").strip().lower()
+            if status in TERMINAL_CALL_STATUSES:
+                self.admission.release(call_id)
+            elif status in CALL_PROGRESS_STATUSES:
+                logger.debug("call status %s is not terminal — the slot is kept", status)
+            else:
+                # Neither terminal nor a status we know: an absent `CallStatus`
+                # means this is not a status callback at all, and a value we do
+                # not recognise is one Twilio has added. Keeping the slot is the
+                # recoverable error — `release_stale` sweeps it — while freeing a
+                # live call's slot is not.
+                logger.warning(
+                    "call status %r is not terminal — the slot is kept; "
+                    "release_stale will reconcile it if the call has ended",
+                    status or "(absent)",
+                )
 
         return 200, "", "text/plain"
 

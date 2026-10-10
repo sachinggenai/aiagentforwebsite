@@ -262,6 +262,62 @@ class TestStatusCallback:
         assert status == 403
         assert admission.active_calls() == 1, "an unsigned callback must change nothing"
 
+    @pytest.mark.parametrize("progress", ["queued", "initiated", "ringing", "in-progress", "answered"])
+    def test_a_progress_status_does_not_release_the_slot(self, progress):
+        """§8.32: the same URL carries progress callbacks when a number is
+        configured with them. Releasing on `ringing` or `answered` would free
+        the slot of a call that is still up, and the ceiling would quietly stop
+        holding — a two-slot box admitting three callers."""
+        admission = AdmissionController(max_concurrent_calls=1)
+        hook = _webhook(admission)
+        hook.voice(params=CALL, signature=_signed(CALL))
+        assert admission.active_calls() == 1
+
+        status_params = {"CallSid": "CA1234567890", "CallStatus": progress}
+        status, _, _ = hook.status(
+            params=status_params, signature=_signed(status_params, path="/twilio/status")
+        )
+
+        assert status == 200
+        assert admission.active_calls() == 1, f"{progress} released a live call's slot"
+
+    def test_a_status_with_no_call_status_is_not_a_release(self):
+        """An absent `CallStatus` means this is not a status callback. Keeping
+        the slot is the recoverable error — `release_stale` sweeps it — while
+        freeing a live call's slot is not."""
+        admission = AdmissionController(max_concurrent_calls=1)
+        hook = _webhook(admission)
+        hook.voice(params=CALL, signature=_signed(CALL))
+
+        status_params = {"CallSid": "CA1234567890"}
+        status, _, _ = hook.status(
+            params=status_params, signature=_signed(status_params, path="/twilio/status")
+        )
+
+        assert status == 200
+        assert admission.active_calls() == 1
+
+    def test_every_terminal_status_releases(self):
+        from anita.voice_webhook import TERMINAL_CALL_STATUSES
+
+        for terminal in sorted(TERMINAL_CALL_STATUSES):
+            admission = AdmissionController(max_concurrent_calls=1)
+            hook = _webhook(admission)
+            hook.voice(params=CALL, signature=_signed(CALL))
+
+            status_params = {"CallSid": "CA1234567890", "CallStatus": terminal}
+            hook.status(
+                params=status_params, signature=_signed(status_params, path="/twilio/status")
+            )
+            assert admission.active_calls() == 0, f"{terminal} did not release the slot"
+
+    def test_the_two_status_sets_do_not_overlap(self):
+        """A status in both would be terminal and in-progress at once, and the
+        release would depend on which check ran first."""
+        from anita.voice_webhook import CALL_PROGRESS_STATUSES, TERMINAL_CALL_STATUSES
+
+        assert not (TERMINAL_CALL_STATUSES & CALL_PROGRESS_STATUSES)
+
 
 class TestTwiML:
     def test_the_stream_url_is_derived_from_the_public_base(self):

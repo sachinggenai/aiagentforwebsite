@@ -674,7 +674,7 @@ def combine_validation(
         name for name, report in (("browser", browser), ("system", system))
         if report is None
     ]
-    citation_failure = _citation_failure(citations)
+    citation_failure_reason = citation_failure(citations)
     if missing:
         return {
             **gate.as_dict(),
@@ -690,7 +690,7 @@ def combine_validation(
 
     passed = (
         bool(gate.passed) and bool(browser.passed) and bool(system.passed)
-        and citation_failure is None
+        and citation_failure_reason is None
     )
     if not gate.passed:
         reason = gate.reason or "evaluation set failed"
@@ -706,8 +706,8 @@ def combine_validation(
         # Named, not counted: "6 use cases unreachable" tells an operator to go
         # and look. "system check failed" does not.
         reason = f"system check failed: {', '.join(system.broken[:8])}"
-    elif citation_failure:
-        reason = citation_failure
+    elif citation_failure_reason:
+        reason = citation_failure_reason
     else:
         reason = (
             f"all {gate.total} cases, {browser.total} scenarios and "
@@ -724,7 +724,43 @@ def combine_validation(
     }
 
 
-def _citation_failure(citations: dict | None) -> str | None:
+def citation_integrity(chat, cases, *, session_prefix: str = "gate-cite") -> dict:
+    """Count provenance over a frozen set: grounded, uncited, incomplete.
+
+    US-012 `TAC-1`/`TAC-2`: a grounded answer with no citation, or a citation
+    that could not be completed, is a composition defect — and the only way to
+    know is to look at every reply the set produced. `QualityGate` sees answer
+    *text*; this sees provenance.
+
+    Extracted so the promotion path and the release gate run the SAME check
+    (§8.33). They did not: the gate script counted citations and could refuse,
+    while `rebuild_index.py` validated through `QualityGate` alone — so an index
+    could be promoted while uncited answers existed, which is the one moment the
+    check was written for. One definition, two callers.
+
+    Never raises: a run that broke is `error`, which `citation_failure` treats
+    as blocking. "We did not check" and "the check passed" must not produce the
+    same promotion.
+    """
+    counts = {"grounded": 0, "uncited": 0, "incomplete": 0}
+    try:
+        for case in cases:
+            body = chat.post_message(
+                message=case.question, session_id=f"{session_prefix}-{case.case_id}"
+            ).body
+            if not body.get("grounded"):
+                continue
+            counts["grounded"] += 1
+            if not body.get("grounded_on"):
+                counts["uncited"] += 1
+            if body.get("citation_incomplete"):
+                counts["incomplete"] += 1
+    except Exception as exc:  # noqa: BLE001 - an integrity run that broke is not a pass
+        counts["error"] = f"{type(exc).__name__}: {exc}"
+    return counts
+
+
+def citation_failure(citations: dict | None) -> str | None:
     """Why the citation counts block promotion, or `None` when they do not.
 
     US-012 `TAC-1`/`TAC-2`: a grounded answer with no citation, or a citation
@@ -732,6 +768,10 @@ def _citation_failure(citations: dict | None) -> str | None:
     compute and print these counts and then drop them before the verdict
     (`§8.24`) — visible in a log, unable to refuse anything. A count that
     cannot fail a release is documentation, not a check.
+
+    Public since §8.33, because the index-promotion path needs the same verdict
+    the release gate reaches, and a second copy of this rule would be a second
+    place for it to drift.
     """
     if not citations:
         return None

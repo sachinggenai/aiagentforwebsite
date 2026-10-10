@@ -55,9 +55,18 @@ def _gate_validator(chat, gate, retriever):
     a sibling bound to `build.collection` and restored afterwards — on failure
     too, so a rejected build cannot leave this process answering from a
     collection that was never promoted.
+
+    §8.33: the verdict carries **provenance** as well as text. The gate alone
+    asserts answer content and never sees citations, so before this a rebuild
+    could be promoted while uncited or incomplete answers existed — the one
+    moment `citation_failure` was written for. It reuses the release gate's own
+    counts and rule rather than re-deriving them, because a second copy of the
+    rule is a second place for it to drift.
     """
 
     def validate(build) -> dict:
+        from anita.observability import citation_failure, citation_integrity
+
         staging = staging_retriever(retriever, build.collection)
         previous = chat.retriever
         chat.retriever = staging
@@ -67,9 +76,19 @@ def _gate_validator(chat, gate, retriever):
                     message=case.question, session_id=f"gate-{case.case_id}"
                 ).body.get("text", "")
             )
+            # A pass of its own, so this does not disturb the text pass's
+            # conversations — the same separation the release gate makes.
+            citations = citation_integrity(chat, gate.cases, session_prefix="gate-cite")
         finally:
             chat.retriever = previous
-        return report.as_dict()
+
+        validation = report.as_dict()
+        validation["citations"] = citations
+        failure = citation_failure(citations)
+        if failure:
+            validation["passed"] = False
+            validation["reason"] = failure
+        return validation
 
     return validate
 

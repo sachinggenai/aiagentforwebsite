@@ -627,6 +627,81 @@ class TestJanitor:
         assert result["resummarised"] == 1
         assert store.unsummarised_closed() == []
 
+    def test_a_restart_summarises_what_the_old_process_could_not(self):
+        """§8.34: the retry looked only in `registry._by_key`, so in a process
+        that had just started — when that map is empty — every id the pending
+        list returned was filtered to nothing and the row stayed unsummarised
+        for good. The retry now rebuilds from the store."""
+        store = _store()
+        first = Orchestrator(ConversationRegistry(idle_window_seconds=0.001, store=store))
+        conversation, _ = first.begin_turn(
+            _Env(channel=Channel.WEB_CHAT, text="hi", session_id="s-restart"))
+
+        original = store.write_summary
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("database is locked")
+
+        store.write_summary = boom  # type: ignore[method-assign]
+        time.sleep(0.01)
+        ConversationJanitor(orchestrator=first).run_once()   # summary lost, row closed
+        assert store.unsummarised_closed() == [conversation.conversation_id]
+        store.write_summary = original  # type: ignore[method-assign]
+
+        # A new process. It has never held this conversation, which is exactly
+        # the case the old retry could not repair.
+        second = Orchestrator(ConversationRegistry(store=store))
+        assert second.registry.count() == 0
+
+        result = ConversationJanitor(orchestrator=second).run_once()
+
+        assert result["resummarised"] == 1
+        assert store.unsummarised_closed() == []
+        record = store.get_conversation(conversation.conversation_id)
+        assert record is not None and record.summary
+
+    def test_a_rebuilt_summary_counts_every_turn_not_the_context_tail(self):
+        """`_seed_context` keeps only the last few turns, because feeding a
+        prompt is what it is for. A summary is a record: rebuilt from the
+        context tail it would under-report a long conversation, which is the
+        one thing a record must not do."""
+        store = _store()
+        recorder = TurnRecorder(store, ReplayQueue(capacity=50))
+        registry = ConversationRegistry(store=store, recorder=recorder)
+        orchestrator = Orchestrator(registry)
+        conversation, _ = orchestrator.begin_turn(
+            _Env(channel=Channel.WEB_CHAT, text="turn 0", session_id="s-long"))
+        assert registry.context_turns < 12, "this test needs more turns than the tail"
+
+        for n in range(1, 12):
+            recorder.record(_turn(conversation.conversation_id, text=f"turn {n}"))
+        stored = store.turn_count(conversation.conversation_id)
+        assert stored > registry.context_turns
+
+        # Rebuilt in a process that never held it, and from the store alone.
+        rebuilt = registry.from_store(conversation.conversation_id)
+
+        assert rebuilt is not None
+        assert len(rebuilt.turns) == stored, "a summary must count the whole thread"
+        assert "12 turns" in registry.summary_for(rebuilt, reason="retry")
+        assert rebuilt.channels_seen == [Channel.WEB_CHAT.value]
+
+    def test_rebuilding_an_unknown_conversation_is_a_miss_not_an_error(self):
+        store = _store()
+        registry = ConversationRegistry(store=store)
+
+        assert registry.from_store("no-such-conversation") is None
+        assert registry.from_store("") is None
+
+    def test_an_unreadable_classification_does_not_lose_the_turn(self):
+        """A label written by an older build must not make a whole summary
+        fail — the turn is still worth counting."""
+        from anita.orchestrator import _intent_or_none
+
+        assert _intent_or_none("catalogue") is not None
+        assert _intent_or_none("a-route-this-build-removed") is None
+        assert _intent_or_none(None) is None
+
     def test_retention_expires_a_transcript_and_keeps_the_row(self):
         """`DG-11`: `expire_transcript` had no caller, so the review's
         `expired` state was unreachable in production."""

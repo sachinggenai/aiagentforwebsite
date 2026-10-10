@@ -476,6 +476,49 @@ class TestBootPreflight:
         assert not report.ok
         assert write_report(report, report.settings) is None
 
+    def test_a_non_isolation_refusal_also_writes_no_report(self):
+        """§8.35: the suppression was keyed on the ISOLATION phase alone, so a
+        refusal from AUDIT, SECRETS, DATA or INDEX still wrote a report into
+        the directory it had just refused to boot in. "A refused boot leaves
+        nothing behind" has to hold for every refusal, not only the one the
+        story happened to demonstrate.
+        """
+        from anita.boot import PhaseResult, write_report
+
+        report = preflight(env=self._env(), project_root=PLATFORM)
+        assert report.settings is not None
+        # A refusal of a kind the isolation guard is not involved in.
+        report.phases = [
+            PhaseResult(name="LOAD", ok=True, detail="config loaded"),
+            PhaseResult(name="ISOLATION", ok=True, detail="green"),
+            PhaseResult(name="DATA", ok=False, detail="corpus missing"),
+        ]
+
+        assert not report.ok
+        assert write_report(report, report.settings) is None
+
+    def test_a_clean_boot_still_writes_its_report(self, tmp_path):
+        """The suppression is about refusals, not about being shy: an operator
+        still gets the artifact of a boot that worked."""
+        from dataclasses import replace
+
+        from anita.boot import write_report
+
+        report = preflight(env=self._env(), project_root=PLATFORM)
+        assert report.ok and report.settings is not None
+        # Only the log directory moves: pointing the whole preflight at tmp_path
+        # would also move the index store it reads, and the boot would fail for
+        # a reason this test is not about.
+        settings = replace(
+            report.settings,
+            isolation=replace(report.settings.isolation, log_dir=str(tmp_path)),
+        )
+
+        path = write_report(report, settings)
+
+        assert path is not None and path.exists()
+        assert path.name == "preflight.json"
+
     def test_report_is_secret_free(self):
         report = preflight(env=self._env(), project_root=PLATFORM)
         from anita.boot import render_report

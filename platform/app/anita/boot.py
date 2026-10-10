@@ -370,17 +370,19 @@ def render_report(report: PreflightReport) -> str:
 def write_report(report: PreflightReport, settings: AnitaSettings | None) -> Path | None:
     """Persist the preflight report under the isolated log directory.
 
-    **Skipped when isolation failed.** Writing a report into the directory the
-    guard just refused would be a side effect on the refusal path — the same
-    class of mistake as binding a port or opening a connection after refusing.
-    A refused boot must leave nothing behind, including its own diagnostics.
+    **Skipped on any refusal, not only isolation's.** A refusal must leave
+    nothing behind — including its own diagnostics — and that is true of an
+    AUDIT, SECRETS, DATA or INDEX refusal exactly as much as an isolation one.
+    Writing into a directory the guard just refused is the same class of mistake
+    as binding a port or opening a connection after refusing (`§8.35`; before
+    this, only the isolation phase suppressed the write).
 
     (The refusal is still fully visible: the preflight prints to stdout, which
     is where an operator is already looking.)
     """
     if settings is None:
         return None
-    if any(phase.name == "ISOLATION" and not phase.ok for phase in report.phases):
+    if not report.ok:
         return None
     log_dir = settings.log_dir_path
     log_dir.mkdir(parents=True, exist_ok=True)

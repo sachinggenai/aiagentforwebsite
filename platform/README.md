@@ -28,7 +28,7 @@ Re-homed from the Meridian University admissions assistant. Full plan in
 | **MOD-08 Observability & Evaluation** | ✅ **built** — US-025…US-027: traces, admin read API, frozen eval set |
 | **MOD-10 Client Surfaces** | ✅ **built** — US-007…US-009: web chat, browser voice, admin console |
 
-**1156 tests passing** (`platform/.venv/Scripts/python -m pytest tests -q`), plus 54 browser
+**1194 tests passing** (`platform/.venv/Scripts/python -m pytest tests -q`), plus 54 browser
 scenarios across desktop and mobile. The deterministic answer path is live over the real corpus:
 price, MOQ, delivery, specifications, comparison and company facts, all read from SQLite with no
 language model involved. One story is not finished — **US-001's real carrier call** — and the open

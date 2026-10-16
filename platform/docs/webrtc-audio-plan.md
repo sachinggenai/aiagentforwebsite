@@ -1,6 +1,7 @@
 # Full-duplex WebRTC audio — an additive plan
 
-> **Status:** plan. **Phase 0 has been run — see §2a.** Media flows between a browser and this
+> **Status: Phase 1 built and working. Phase 2 declined — see §5b.**
+> **Phase 0 has been run — see §2a.** Media flows between a browser and this
 > box, and the network position is better than §2 first claimed. The remote half needs one
 > browser on a different network to finish.
 > **Read §1 before costing this** — the runbook line being fixed describes two different
@@ -206,6 +207,29 @@ Two honest points before committing to it:
 **Recommendation: do Phase 0, then Phase 1. Treat Phase 2 as a separate decision made after
 Phase 1 is running**, because Phase 1 is what removes the disqualifying sentence from the
 runbook, and Phase 2 is what could take voice down.
+
+## 5b. Phase 2 — declined, and the reason is worth keeping
+
+Decided 2026-10-16: **not doing it.** What settled it is not what this plan originally said,
+and the correction matters more than the decision.
+
+**Phase 2 cannot be additive, and the echo gate is why.**
+
+* The turn model *is* the engine: `feed_audio()` accumulates until the VAD declares
+  end-of-utterance and returns `True`, then `process_utterance()` runs (`voice.py:1161`,
+  `:1218`). There is no seam to hang a second mode behind.
+* `admit_inbound_frame()` returns `FRAME_ECHO` to reject the assistant's own playback arriving
+  back through the microphone (`voice.py:945-1018`). **That gate works only because the two
+  sides never speak at once.** Simultaneous audio breaks its central assumption — and it is not
+  incidental code: it was the fix for defect §8.30, where the barge-in window was dead on real
+  calls.
+
+So Phase 2 edits `voice.py`: the file the "nothing breaks" constraint protects, and the one
+this repo guards with a vendored definition manifest. Weeks of work against an explicit
+constraint, for a difference barge-in already covers in a short demo.
+
+**What is true as a result:** the browser-audio transport *is* WebRTC and may be described as
+such. It is **not** full duplex, and the runbook now says so in two places rather than one.
 
 ## 6. What it costs beyond code
 

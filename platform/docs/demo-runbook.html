@@ -574,7 +574,7 @@
       <div class="callout">
         <span class="ctitle">Two honest notes</span>
         <p>It runs over a secure connection and needs one: the public <code>https://</code> address works, and so does <code>localhost</code>. A plain <code>http://192.168.x.x</code> address will not — browsers block microphone access on insecure origins.</p>
-        <p>It is not WebRTC. It is a WebSocket carrying audio frames, and it is turn-based: you speak, it answers, and you can interrupt. Calling it full-duplex would be overstating it.</p>
+        <p>It is turn-based: you speak, it answers, and you can interrupt. Calling it <em>full duplex</em> would be overstating it — the assistant does not talk while you talk.</p>
       </div>
     </div>
 
@@ -737,9 +737,14 @@
             <td>Verified in-process only. See Act 04.</td>
           </tr>
           <tr>
-            <td>Full-duplex WebRTC audio</td>
+            <td><strong>WebRTC</strong> as the browser-audio transport</td>
+            <td><span class="pill p-ready">Works today</span></td>
+            <td>The channel is WebRTC when <code>ANITA_WEBRTC_ENABLED</code> is set — a peer connection carrying Opus, not a WebSocket carrying frames. Verified by a call that transcribed real speech. The WebSocket path is still the default and still works.</td>
+          </tr>
+          <tr>
+            <td>Full-duplex audio — the assistant talking <em>while</em> you talk</td>
             <td><span class="pill p-stop">Cannot be demoed</span></td>
-            <td>The browser audio is a WebSocket carrying audio frames — turn-based with interruption, not simultaneous. Do not describe it as WebRTC.</td>
+            <td>Still turn-based: the assistant waits for the end of your utterance, then answers, and you can interrupt it. Simultaneous speech needs the engine's echo gate reworked — it distinguishes your voice from the assistant's playback precisely because the two never overlap. Say "interruptible", never "full duplex".</td>
           </tr>
           <tr>
             <td>Voice notes and images on WhatsApp</td>

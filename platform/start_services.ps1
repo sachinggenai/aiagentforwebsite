@@ -800,9 +800,14 @@ if ($PublicHost) {
 Write-Host ""
 if ($PublicHost) {
     Write-Host ("{0}  Public (Cloudflare){1}" -f $BOLD, $RESET)
+    # The buyer chat, the console and the dialer are all on the API host --
+    # one tunnel serves them, so they are grouped under it and the liveness
+    # verdict below covers all three rather than the first line only.
     Write-Host ("    chat (API)       : https://{0}/" -f $PublicHost)
+    Write-Host ("    console          : https://{0}/console          (bearer token)" -f $PublicHost)
+    Write-Host ("    dialer           : https://{0}/dialer           (bearer token)" -f $PublicHost)
     if ($PublicLive) {
-        Write-Host ("    {0}reachable now{1}" -f $GREEN, $RESET)
+        Write-Host ("    {0}all three reachable now{1}" -f $GREEN, $RESET)
     } else {
         Write-Host ("    {0}NOT reachable - stale host, or its tunnel is not running{1}" -f $RED, $RESET)
     }
@@ -833,8 +838,14 @@ if ($PublicHost) {
 Write-Host ("{0}  Local (this machine){1}" -f $BOLD, $RESET)
 Write-Host ("    chat            : http://127.0.0.1:{0}/" -f $ApiPort)
 Write-Host ("    console         : http://127.0.0.1:{0}/console            (bearer token)" -f $ApiPort)
+Write-Host ("    dialer          : http://127.0.0.1:{0}/dialer             (bearer token)" -f $ApiPort)
 Write-Host ("    api contract    : http://127.0.0.1:{0}/contract" -f $ApiPort)
 if (-not $NoStreamlit) { Write-Host ("    streamlit       : http://127.0.0.1:{0}" -f $StreamlitPort) }
+if ($Local) {
+    # The dialer places calls the carrier has to be able to call back into, so
+    # it needs a public URL even when the operator is sitting at the box.
+    Write-Host ("    {0}dialer calls need a live public URL - -Local starts no tunnel{1}" -f $YELLOW, $RESET)
+}
 Write-Host ""
 Write-Host ("{0}  Endpoints{1}" -f $BOLD, $RESET)
 Write-Host ("    buyer   : GET  /                      POST /api/chat/message" -f $RESET)
@@ -870,6 +881,8 @@ $lines += ""
 $lines += "PUBLIC  (Cloudflare - open this from anywhere)"
 if ($PublicHost) {
     $lines += "  chat (API)       https://$PublicHost/"
+    $lines += "  console          https://$PublicHost/console          (bearer token)"
+    $lines += "  dialer           https://$PublicHost/dialer           (bearer token)"
     if ($PublicLive) {
         $lines += "  status: reachable now (/health answered 200)"
     } else {
@@ -889,6 +902,7 @@ $lines += ""
 $lines += "LOCAL  (this machine - open this on the box itself)"
 $lines += "  chat            http://127.0.0.1:$ApiPort/"
 $lines += "  console         http://127.0.0.1:$ApiPort/console         (bearer token)"
+$lines += "  dialer          http://127.0.0.1:$ApiPort/dialer          (bearer token)"
 $lines += "  api contract    http://127.0.0.1:$ApiPort/contract"
 $lines += "  health          http://127.0.0.1:$ApiPort/health"
 if (-not $NoStreamlit) { $lines += "  streamlit       http://127.0.0.1:$StreamlitPort" }
@@ -935,9 +949,13 @@ if ($PublicHost) {
     Write-Host ("    curl https://{0}/health" -f $PublicHost)
     Write-Host ""
 }
-if ($StreamlitTunnelHost) {
-    Write-Host ("{0}  Open the Streamlit chat{1}" -f $BOLD, $RESET)
-    Write-Host ("    https://{0}" -f $StreamlitTunnelHost)
+if ($PublicHost) {
+    Write-Host ("{0}  Open{1}" -f $BOLD, $RESET)
+    Write-Host ("    chat   : https://{0}/" -f $PublicHost)
+    Write-Host ("    dialer : https://{0}/dialer   (bearer token)" -f $PublicHost)
+    if ($StreamlitTunnelHost) {
+        Write-Host ("    chat   : https://{0}" -f $StreamlitTunnelHost)
+    }
     Write-Host ""
 }
 

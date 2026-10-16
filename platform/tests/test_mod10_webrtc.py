@@ -117,6 +117,22 @@ def _client(**kwargs):
     )))
 
 
+# ---------------------------------------------------------------------------
+# Not tested here: that the inbound consumer stays alive.
+#
+# The defect is real and was found by running a call, not by a unit test —
+# `asyncio.ensure_future` returned a task nothing held, so it was eligible for
+# collection and cancelled mid-flight. Every cheap signal still said the call
+# was healthy: ICE `connected`, the peer connection `connected`, RTP flowing in
+# both directions, and no audio ever reaching the engine.
+#
+# A unit test for it would have to rebuild the very wiring it is checking, and
+# would therefore pass whether or not the real handler holds the reference. The
+# regression guard that works here is the live call: `scripts/webrtc_smoke`-style
+# runs assert a `VoiceCall: transcript` line appears. Recorded in the plan doc.
+# ---------------------------------------------------------------------------
+
+
 class TestTheRoute:
     """`POST /api/voice/webrtc/offer` and the page that drives it."""
 

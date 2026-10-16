@@ -113,67 +113,68 @@ def ulaw_to_audio_frames(chunks: list[bytes], *, rate: int = WEBRTC_RATE):
     return frames
 
 
-class _AnswerTrack:
+def make_answer_track():
     """The assistant's voice, as an aiortc audio track.
 
-    Paces itself. aiortc calls `recv()` in a loop and sends whatever it returns
-    immediately, so a track that returns as fast as it is asked floods the
-    socket; the 20 ms sleep is what makes this real time.
+    **A real `MediaStreamTrack` subclass, built here rather than wrapped.**
+    aiortc checks track types internally, and a duck-typed stand-in is accepted
+    by `addTrack` and then quietly not driven — which looks exactly like a
+    connection that works and never carries audio.
+
+    It paces itself: aiortc calls `recv()` in a loop and sends whatever comes
+    back immediately, so a track that returns as fast as it is asked floods the
+    socket. The 20 ms wait is what makes this real time, and the silence frames
+    are what keep the far end's jitter buffer from stalling when the assistant
+    has nothing to say.
     """
+    from aiortc import MediaStreamTrack
 
-    kind = "audio"
+    class AnswerTrack(MediaStreamTrack):
+        kind = "audio"
 
-    def __init__(self) -> None:
-        from aiortc import MediaStreamTrack
+        def __init__(self) -> None:
+            super().__init__()
+            self._buffer: list = []
+            self._next_send = 0.0
+            self._pts = 0
+            #: Counted so "the connection is up and no audio moved" is
+            #: observable rather than inferred.
+            self.frames_sent = 0
 
-        class _Track(MediaStreamTrack):
-            kind = "audio"
+        async def recv(self):
+            now = time.monotonic()
+            if not self._next_send:
+                self._next_send = now
+            delay = self._next_send - now
+            if delay > 0:
+                await asyncio.sleep(delay)
+            self._next_send += FRAME_SECONDS
 
-            def __init__(self) -> None:
-                super().__init__()
-                self._buffer: list = []
-                self._next_send = 0.0
-                self._pts = 0
+            frame = self._buffer.pop(0) if self._buffer else _silence_frame()
+            frame.pts = self._pts
+            frame.time_base = fractions.Fraction(1, WEBRTC_RATE)
+            self._pts += frame.samples
+            self.frames_sent += 1
+            return frame
 
-            async def recv(self):
-                now = time.monotonic()
-                if not self._next_send:
-                    self._next_send = now
-                delay = self._next_send - now
-                if delay > 0:
-                    await asyncio.sleep(delay)
-                self._next_send += FRAME_SECONDS
+        def push(self, frames) -> None:
+            self._buffer.extend(frames)
 
-                if self._buffer:
-                    frame = self._buffer.pop(0)
-                else:
-                    frame = self._silence()
-                frame.pts = self._pts
-                frame.time_base = fractions.Fraction(1, WEBRTC_RATE)
-                self._pts += frame.samples
-                return frame
+        def flush(self) -> None:
+            """Drop what has not been sent — the analogue of Twilio `clear`."""
+            self._buffer.clear()
 
-            def _silence(self):
-                import av
+    return AnswerTrack()
 
-                frame = av.AudioFrame(
-                    format="s16", layout="mono", samples=WEBRTC_RATE // 50
-                )
-                frame.sample_rate = WEBRTC_RATE
-                frame.planes[0].update(b"\x00" * (WEBRTC_RATE // 50 * 2))
-                return frame
 
-            def push(self, frames) -> None:
-                self._buffer.extend(frames)
+def _silence_frame():
+    import av
 
-            def flush(self) -> None:
-                """Drop what has not been sent — the analogue of Twilio `clear`."""
-                self._buffer.clear()
-
-        self._track = _Track()
-
-    def __getattr__(self, name):
-        return getattr(self._track, name)
+    samples = WEBRTC_RATE // 50          # 20 ms
+    frame = av.AudioFrame(format="s16", layout="mono", samples=samples)
+    frame.sample_rate = WEBRTC_RATE
+    frame.planes[0].update(b"\x00" * (samples * 2))
+    return frame
 
 
 __all__ = [
@@ -220,6 +221,9 @@ class WebRTCVoiceSession:
         self._turn = None
         self._speaking = False
         self._pcm_buffer = b""
+        #: Held for the life of the call. See `on_track`.
+        self._consumer = None
+        self._remote_track = None
 
     # -- signalling --------------------------------------------------------
     async def handle_offer(self, *, sdp: str, kind: str) -> dict:
@@ -234,13 +238,22 @@ class WebRTCVoiceSession:
         pc = RTCPeerConnection(configuration=config)
         self._pc = pc
 
-        self._track = _AnswerTrack()
+        self._track = make_answer_track()
         pc.addTrack(self._track)
 
         @pc.on("track")
         def on_track(track):
-            if track.kind == "audio":
-                asyncio.ensure_future(self._consume(track))
+            if track.kind != "audio":
+                return
+            logger.info("webrtc voice: inbound track opened (%s)", track.kind)
+            # **Both references are kept, and neither is optional.** A task
+            # created and dropped is eligible for garbage collection, which
+            # cancels the coroutine mid-flight — and the symptom is a call that
+            # reports `connected` at both ends, carries RTP in both directions,
+            # and never reaches the engine. Holding the task and the track is
+            # what keeps the consumer alive for the life of the call.
+            self._remote_track = track
+            self._consumer = asyncio.ensure_future(self._consume(track))
 
         @pc.on("connectionstatechange")
         async def on_state():
@@ -266,9 +279,18 @@ class WebRTCVoiceSession:
     # -- inbound audio -----------------------------------------------------
     async def _consume(self, track) -> None:
         """Decode frames from the browser onto the engine's 20 ms grid."""
+        received = 0
         try:
             while not self.closed:
                 frame = await track.recv()
+                received += 1
+                if received % 250 == 1:      # ~5 s of audio
+                    logger.info(
+                        "webrtc voice: %d inbound frames (%d Hz, %s) — %.1fs of audio",
+                        received, getattr(frame, "sample_rate", 0),
+                        getattr(getattr(frame, "layout", None), "name", "?"),
+                        received * FRAME_SECONDS,
+                    )
                 ulaw = audio_frame_to_ulaw(frame)
                 if not ulaw:
                     continue

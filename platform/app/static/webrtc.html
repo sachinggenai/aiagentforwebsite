@@ -115,6 +115,7 @@ async function start() {
     log("ticket", "issued");
 
     pc = new RTCPeerConnection();
+    window.__pc = pc;   // handle for diagnostics
     pc.oniceconnectionstatechange = () => {
       log("ice", pc.iceConnectionState);
       if (pc.iceConnectionState === "connected") setState("live", "ok");

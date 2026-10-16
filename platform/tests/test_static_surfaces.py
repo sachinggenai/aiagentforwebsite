@@ -27,6 +27,11 @@ from anita.surfaces import ROUTE_TABLE, Route, Surface, requires_auth  # noqa: E
 STATIC = PLATFORM / "app" / "static"
 CHAT = STATIC / "chat.html"
 CONSOLE = STATIC / "console.html"
+DIALER = STATIC / "dialer.html"
+
+#: The pages behind the admin token. More than one, which is why the route
+#: check below looks at their union rather than at the console alone.
+ADMIN_PAGES = (CONSOLE, DIALER)
 
 # Every "/api/..." or "/health" literal a page fetches or posts to. The query
 # string is dropped — "/api/admin/conversation?conversation_id=..." is the same
@@ -50,7 +55,7 @@ def declared_paths(surface: Surface | None = None) -> set[str]:
 # ---------------------------------------------------------------------------
 # The pages exist
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize("page", [CHAT, CONSOLE])
+@pytest.mark.parametrize("page", [CHAT, CONSOLE, DIALER])
 def test_the_page_exists_and_is_self_contained(page: Path):
     """No build step, no external dependency: the page has to work from a phone
     on a bad connection, so everything is inline."""
@@ -62,7 +67,7 @@ def test_the_page_exists_and_is_self_contained(page: Path):
             f"{page.name} loads an external asset; the surfaces must be self-contained"
 
 
-@pytest.mark.parametrize("page", [CHAT, CONSOLE])
+@pytest.mark.parametrize("page", [CHAT, CONSOLE, DIALER])
 def test_the_page_is_responsive(page: Path):
     html = page.read_text(encoding="utf-8")
     assert "width=device-width" in html, f"{page.name} is not mobile-usable"
@@ -72,10 +77,17 @@ def test_the_page_is_responsive(page: Path):
 # ---------------------------------------------------------------------------
 # The pages and the route table agree
 # ---------------------------------------------------------------------------
-def test_the_console_calls_every_admin_route():
+def test_every_admin_route_is_called_by_an_admin_page():
     """An admin route no page calls is dead weight; a page calling a route that
-    is not declared would 404 in production and never in a test."""
-    assert paths_in(CONSOLE) == declared_paths(Surface.ADMIN_CONSOLE) - {"/health"}
+    is not declared would 404 in production and never in a test.
+
+    Checked across the union of the admin pages rather than the console alone.
+    There are two now — the console reads the instance, the dialer spends the
+    carrier account — and requiring each to call the other's routes would push
+    an operator towards opening a dashboard to place one call.
+    """
+    called = set().union(*(paths_in(page) for page in ADMIN_PAGES))
+    assert called == declared_paths(Surface.ADMIN_CONSOLE) - {"/health"}
 
 
 def test_the_chat_page_calls_only_buyer_routes():
@@ -85,9 +97,10 @@ def test_the_chat_page_calls_only_buyer_routes():
     assert called <= declared_paths(), f"chat.html calls undeclared routes: {called}"
 
 
-def test_the_console_calls_only_declared_routes():
-    called = paths_in(CONSOLE)
-    assert called <= declared_paths(), f"console.html calls undeclared routes: {called}"
+@pytest.mark.parametrize("page", ADMIN_PAGES)
+def test_an_admin_page_calls_only_declared_routes(page: Path):
+    called = paths_in(page)
+    assert called <= declared_paths(), f"{page.name} calls undeclared routes: {called}"
 
 
 def test_no_page_reaches_an_admin_route_it_should_not():

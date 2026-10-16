@@ -583,6 +583,7 @@ def assemble(
     # The Twilio ingress (US-001): signature, then admission, then TwiML — in
     # that order. Built from the same admission controller the rest of the app
     # uses, so a call refused here is a call the platform knows it refused.
+    from .dialer import OutboundDialer, calling_window
     from .voice_webhook import CallAllowList, VoiceWebhook, greeting_text
 
     # The channel tables (US-001). Best-effort: a platform that cannot open its
@@ -817,6 +818,18 @@ def assemble(
         browser_voice=_voice_session_factory(),
         messaging=messaging,
         extra_channel=extra_ingress,
+        # The demo dialer. Built even when the instance has no carrier
+        # credentials, so `GET /dialer` can say what is missing rather than
+        # 404 — an operator looking for it should find the page that explains
+        # itself.
+        dialer=OutboundDialer(
+            account_sid=account_sid,
+            auth_token=twilio_token,
+            from_number=voice_number,
+            public_base_url=public_base_url,
+            env_path=settings.project_root / ".env",
+            window=calling_window(settings),
+        ),
     )
 
     for note in notes:

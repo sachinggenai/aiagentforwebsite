@@ -183,7 +183,10 @@ class TestArguments:
         declared = set(BODY_ARGUMENTS) | set(QUERY_ARGUMENTS)
         takes_nothing = {Route.HEALTH, Route.ADMIN_CHANNELS,
                          Route.ADMIN_METRICS, Route.ADMIN_GATE,
-                         Route.ADMIN_HANDOFFS}
+                         Route.ADMIN_HANDOFFS,
+                         # A plain read of the dialable list. The two routes
+                         # that carry a dialer payload are in BODY_ARGUMENTS.
+                         Route.ADMIN_DIALABLE}
         assert set(Route) - declared == takes_nothing
 
     def test_no_argument_is_declared_in_both_places(self):

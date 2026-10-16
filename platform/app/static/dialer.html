@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="en-IN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ANITA — Outbound Dialer</title>
+<style>
+  /* Same tokens as the console and the buyer chat, so the three read as one
+     product rather than as three tools that happen to share a host. */
+  :root {
+    --bg:#0f1319; --panel:#161c24; --panel2:#1d242e; --ink:#e8ecf1; --muted:#8e99a8;
+    --line:#252d38; --brand:#3d9fd0; --ok:#2e9e5b; --warn:#d0932b; --bad:#d0533f;
+    --radius:10px;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f4f6f8; --panel:#fff; --panel2:#eef1f5; --ink:#12161c; --muted:#5b6472;
+            --line:#dfe3e9; --brand:#0b5d8a; --ok:#1e7a45; --warn:#9a6c14; --bad:#b03a28; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  header { display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+           padding:14px 18px; background:var(--panel); border-bottom:1px solid var(--line); }
+  header h1 { font-size:15px; margin:0; font-weight:600; }
+  .spacer { flex:1; }
+  .pill { font-size:11.5px; padding:3px 9px; border-radius:11px; background:var(--panel2);
+          color:var(--muted); border:1px solid var(--line); }
+  button, input, select { font:inherit; }
+  button { background:var(--brand); color:#fff; border:0; border-radius:7px;
+           padding:8px 14px; font-weight:600; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--ink); border:1px solid var(--line); }
+  button.link { background:none; color:var(--bad); border:0; padding:2px 6px;
+                font-weight:600; font-size:12.5px; }
+  button:disabled { opacity:.5; cursor:default; }
+  input { background:var(--bg); color:var(--ink); border:1px solid var(--line);
+          border-radius:7px; padding:8px 11px; min-width:0; }
+  main { padding:18px; display:grid; gap:18px;
+         grid-template-columns:repeat(auto-fit, minmax(330px, 1fr)); align-items:start; }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
+            padding:14px 16px; }
+  section h2 { font-size:12px; text-transform:uppercase; letter-spacing:.06em;
+               color:var(--muted); margin:0 0 12px; font-weight:700; }
+  .wide { grid-column:1 / -1; }
+  .row { display:flex; align-items:center; gap:9px; padding:7px 0;
+         border-bottom:1px solid var(--line); }
+  .row:last-child { border-bottom:0; }
+  .num { font-variant-numeric:tabular-nums; font-weight:600;
+         font-family:ui-monospace,Menlo,Consolas,monospace; }
+  .detail { color:var(--muted); font-size:12.5px; }
+  .empty { color:var(--muted); padding:14px 0; text-align:center; }
+  .err { color:var(--bad); }
+  .ok { color:var(--ok); }
+  .field { display:flex; gap:9px; align-items:center; flex-wrap:wrap; }
+  .field input[type=text] { flex:1; min-width:180px; }
+  label.check { display:flex; align-items:center; gap:7px; color:var(--muted);
+                font-size:12.5px; cursor:pointer; }
+  .note { background:var(--panel2); border:1px solid var(--line); border-radius:8px;
+          padding:10px 12px; color:var(--muted); font-size:12.5px; margin-top:12px; }
+  .result { margin-top:14px; }
+  .result .big { font-size:15px; font-weight:600; }
+  pre { background:var(--panel2); border:1px solid var(--line); border-radius:8px;
+        padding:11px; overflow:auto; max-height:240px; margin:10px 0 0; font-size:12.5px;
+        white-space:pre-wrap; word-break:break-word; }
+  dialog { background:var(--panel); color:var(--ink); border:1px solid var(--line);
+           border-radius:var(--radius); max-width:440px; width:92vw; padding:20px; }
+  dialog::backdrop { background:rgba(0,0,0,.55); }
+  dialog h3 { margin:0 0 10px; font-size:15px; }
+  dialog .field { margin-top:16px; justify-content:flex-end; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Outbound Dialer</h1>
+  <span class="pill" id="instance">ANITA instance</span>
+  <span class="spacer"></span>
+  <input type="password" id="token" placeholder="Admin token" aria-label="Admin token"
+         style="width:200px">
+  <button id="connect">Connect</button>
+</header>
+
+<main>
+  <section>
+    <h2>Dialable numbers</h2>
+    <p class="detail" style="margin:0 0 10px">
+      Only these can be called. The list is checked here and again by the
+      platform when the carrier asks for the call's instructions.
+    </p>
+    <div id="numbers"><div class="empty">Connect to load.</div></div>
+    <div class="field" style="margin-top:12px">
+      <input type="tel" id="add-number" placeholder="+91XXXXXXXXXX" aria-label="Number to add">
+      <button class="ghost" id="add">Add</button>
+    </div>
+    <div class="note" id="config-note" hidden></div>
+  </section>
+
+  <section>
+    <h2>Place a call</h2>
+    <div class="field">
+      <input type="tel" id="call-number" list="dialable-options"
+             placeholder="+91XXXXXXXXXX" aria-label="Number to call">
+      <datalist id="dialable-options"></datalist>
+      <button id="call">Call</button>
+    </div>
+    <label class="check" style="margin-top:12px">
+      <input type="checkbox" id="any-time">
+      Allow outside the calling window
+    </label>
+    <div class="note">
+      The assistant rings the number, greets whoever answers, and then answers
+      questions against the same catalogue as every other channel. Watch the
+      instance window to follow the call; it appears in the console afterwards.
+    </div>
+    <div class="result" id="result"></div>
+  </section>
+
+  <section class="wide">
+    <h2>Calls placed from this page</h2>
+    <div id="history"><div class="empty">Nothing yet.</div></div>
+    <p class="detail" style="margin:12px 0 0">
+      This list is only what this tab has done — the platform's own record lives
+      in the console and in <code>logs/instance.log</code>. Placing a call here
+      is not the follow-up feature: that stays held for a legal review of
+      calling real buyers, and nothing on this page changes that.
+    </p>
+  </section>
+</main>
+
+<dialog id="refusal">
+  <h3 id="refusal-title">Call not placed</h3>
+  <p id="refusal-body" style="margin:0"></p>
+  <div class="field">
+    <button class="ghost" id="refusal-close">Close</button>
+  </div>
+</dialog>
+
+<script>
+"use strict";
+const API = location.origin;
+const $ = (id) => document.getElementById(id);
+
+// sessionStorage, not localStorage: this page is opened on a shared demo
+// machine, and an admin token should not outlive the tab.
+let token = sessionStorage.getItem("anita-admin") || "";
+let numbers = [];
+let history = [];
+
+function setInstance(text, cls) {
+  const el = $("instance");
+  el.textContent = text;
+  el.className = "pill" + (cls ? " " + cls : "");
+}
+
+async function api(route, options) {
+  const res = await fetch(API + route, Object.assign({
+    headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token }
+  }, options || {}));
+  let data = null;
+  try { data = await res.json(); } catch (e) { data = null; }
+  if (!res.ok) {
+    throw new Error((data && (data.error || data.reason)) || ("HTTP " + res.status));
+  }
+  return data;
+}
+
+function renderNumbers() {
+  const box = $("numbers");
+  box.textContent = "";
+  if (!numbers.length) {
+    const d = document.createElement("div");
+    d.className = "empty";
+    d.textContent = "No numbers are dialable. Add one below.";
+    box.appendChild(d);
+  } else {
+    numbers.forEach((n) => {
+      const row = document.createElement("div");
+      row.className = "row";
+      const span = document.createElement("span");
+      span.className = "num";
+      span.textContent = n;
+      const spacer = document.createElement("span");
+      spacer.className = "spacer";
+      const del = document.createElement("button");
+      del.className = "link";
+      del.textContent = "Remove";
+      del.addEventListener("click", () => removeNumber(n));
+      row.append(span, spacer, del);
+      box.appendChild(row);
+    });
+  }
+  const options = $("dialable-options");
+  options.textContent = "";
+  numbers.forEach((n) => {
+    const o = document.createElement("option");
+    o.value = n;
+    options.appendChild(o);
+  });
+  if (numbers.length && !$("call-number").value) {
+    $("call-number").value = numbers[0];
+  }
+}
+
+function renderHistory() {
+  const box = $("history");
+  box.textContent = "";
+  if (!history.length) {
+    const d = document.createElement("div");
+    d.className = "empty";
+    d.textContent = "Nothing yet.";
+    box.appendChild(d);
+    return;
+  }
+  history.forEach((entry) => {
+    const row = document.createElement("div");
+    row.className = "row";
+    const num = document.createElement("span");
+    num.className = "num";
+    num.textContent = entry.to;
+    const detail = document.createElement("span");
+    detail.className = "detail";
+    detail.textContent = entry.status + " · " + entry.sid;
+    const spacer = document.createElement("span");
+    spacer.className = "spacer";
+    const when = document.createElement("span");
+    when.className = "detail";
+    when.textContent = entry.at;
+    row.append(num, spacer, detail, when);
+    box.appendChild(row);
+  });
+}
+
+async function load() {
+  const data = await api("/api/admin/dialable");
+  numbers = data.numbers || [];
+  renderNumbers();
+
+  const note = $("config-note");
+  if (data.configured) {
+    note.hidden = true;
+  } else {
+    note.hidden = false;
+    note.textContent = "This instance cannot place calls yet — missing "
+      + (data.missing || []).join(", ") + ".";
+  }
+  setInstance(data.configured ? "ready" : "not configured", data.configured ? "" : "err");
+}
+
+async function addNumber() {
+  const value = $("add-number").value.trim();
+  if (!value) { $("add-number").focus(); return; }
+  try {
+    const data = await api("/api/admin/dialable", {
+      method: "POST",
+      body: JSON.stringify({ number: value, action: "add" })
+    });
+    numbers = data.numbers || [];
+    $("add-number").value = "";
+    renderNumbers();
+  } catch (err) {
+    setInstance(err.message, "err");
+  }
+}
+
+async function removeNumber(number) {
+  try {
+    const data = await api("/api/admin/dialable", {
+      method: "POST",
+      body: JSON.stringify({ number: number, action: "remove" })
+    });
+    numbers = data.numbers || [];
+    renderNumbers();
+  } catch (err) {
+    setInstance(err.message, "err");
+  }
+}
+
+function showRefusal(message) {
+  $("refusal-body").textContent = message;
+  $("refusal").showModal();
+}
+
+async function placeCall() {
+  const value = $("call-number").value.trim();
+  if (!value) { $("call-number").focus(); return; }
+  $("call").disabled = true;
+  $("result").textContent = "";
+  try {
+    const data = await api("/api/admin/call", {
+      method: "POST",
+      body: JSON.stringify({ number: value, any_time: $("any-time").checked })
+    });
+    const box = $("result");
+    const big = document.createElement("div");
+    big.className = "big ok";
+    big.textContent = "Ringing " + data.to;
+    const detail = document.createElement("div");
+    detail.className = "detail";
+    detail.textContent = "status " + data.status + " · " + data.sid;
+    box.append(big, detail);
+    history.unshift({
+      to: data.to, status: data.status, sid: data.sid,
+      at: new Date().toLocaleTimeString()
+    });
+    renderHistory();
+  } catch (err) {
+    showRefusal(err.message);
+  } finally {
+    $("call").disabled = false;
+  }
+}
+
+async function connect() {
+  const value = $("token").value.trim();
+  if (value) {
+    token = value;
+    sessionStorage.setItem("anita-admin", token);
+    $("token").value = "";
+  }
+  if (!token) { $("token").focus(); return; }
+  try {
+    await load();
+  } catch (err) {
+    setInstance(err.message, "err");
+  }
+}
+
+$("connect").addEventListener("click", connect);
+$("add").addEventListener("click", addNumber);
+$("call").addEventListener("click", placeCall);
+$("refusal-close").addEventListener("click", () => $("refusal").close());
+$("add-number").addEventListener("keydown", (e) => e.key === "Enter" && addNumber());
+$("call-number").addEventListener("keydown", (e) => e.key === "Enter" && placeCall());
+$("token").addEventListener("keydown", (e) => e.key === "Enter" && connect());
+
+if (token) { $("token").value = token; connect(); }
+</script>
+</body>
+</html>

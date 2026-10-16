@@ -52,6 +52,11 @@ METHOD_AND_PATH: dict[Route, tuple[str, str]] = {
 BODY_ARGUMENTS: dict[Route, tuple[str, ...]] = {
     Route.CHAT_MESSAGE: ("message", "session_id"),
     Route.VOICE_TICKET: ("session_id",),
+    # The dialer. `any_time` is the operator's knowing override of the calling
+    # window — spelled out here rather than inferred, so it is visible in the
+    # contract that a request can ask for it.
+    Route.ADMIN_DIALABLE_EDIT: ("number", "action"),
+    Route.ADMIN_CALL: ("number", "any_time"),
 }
 QUERY_ARGUMENTS: dict[Route, tuple[str, ...]] = {
     Route.CHAT_HISTORY: ("session_id",),
@@ -376,6 +381,13 @@ def create_app(router: Router, *, title: str = "ANITA MEDICAL SYSTEMS") -> FastA
     @app.get("/console", include_in_schema=False)
     async def console_page() -> Any:
         return _page("console.html")
+
+    # The dialer is its own page rather than a console panel: it is the one
+    # surface an operator opens *before* a demo, on whatever device is to hand,
+    # and it should not require reading a dashboard to place a call.
+    @app.get("/dialer", include_in_schema=False)
+    async def dialer_page() -> Any:
+        return _page("dialer.html")
 
     @app.get("/contract", include_in_schema=False)
     async def contract(request: Request) -> Any:

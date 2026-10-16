@@ -57,6 +57,12 @@ class Route(str, Enum):
     # US-002: the outbound send queue. A buyer whose answer the carrier would
     # not carry is an operator's problem, and this is where they see it.
     ADMIN_SENDS = "GET /api/admin/sends"
+    # The outbound demo dialer. Admin surfaces: placing a call spends the
+    # operator's carrier account and rings somebody's phone, which is not a
+    # buyer action.
+    ADMIN_DIALABLE = "GET /api/admin/dialable"
+    ADMIN_DIALABLE_EDIT = "POST /api/admin/dialable"
+    ADMIN_CALL = "POST /api/admin/call"
 
 
 # Which surface each route serves, and whether it needs authentication.
@@ -76,6 +82,9 @@ ROUTE_TABLE: dict[Route, tuple[Surface, bool]] = {
     Route.ADMIN_GATE: (Surface.ADMIN_CONSOLE, True),
     Route.ADMIN_HANDOFFS: (Surface.ADMIN_CONSOLE, True),
     Route.ADMIN_SENDS: (Surface.ADMIN_CONSOLE, True),
+    Route.ADMIN_DIALABLE: (Surface.ADMIN_CONSOLE, True),
+    Route.ADMIN_DIALABLE_EDIT: (Surface.ADMIN_CONSOLE, True),
+    Route.ADMIN_CALL: (Surface.ADMIN_CONSOLE, True),
 }
 
 
@@ -736,6 +745,56 @@ class AdminSurface:
 # ---------------------------------------------------------------------------
 # Router
 # ---------------------------------------------------------------------------
+class DialerSurface:
+    """The outbound demo dialer — the backend behind `GET /dialer`.
+
+    Every refusal travels as a sentence, because the person using this is
+    trying to place one call before a demo and a bare 403 does not tell them
+    that the number is not on the list, or that it is midnight where the
+    calling window is measured.
+
+    The dialer object is injected rather than constructed here, so this surface
+    can be exercised without a carrier account — which is also how the tests
+    drive it.
+    """
+
+    def __init__(self, *, dialer) -> None:
+        self.dialer = dialer
+
+    def dialable(self) -> Response:
+        return Response(200, {
+            "numbers": self.dialer.dialable(),
+            "configured": self.dialer.configured,
+            "missing": self.dialer.missing(),
+        })
+
+    def edit_dialable(self, *, number: str = "", action: str = "") -> Response:
+        from .dialer import DialRefused
+
+        try:
+            if action == "add":
+                numbers = self.dialer.add(number)
+            elif action == "remove":
+                numbers = self.dialer.remove(number)
+            else:
+                return Response(400, {"error": "action must be 'add' or 'remove'"})
+        except DialRefused as exc:
+            return Response(400, {"error": str(exc)})
+        return Response(200, {"numbers": numbers})
+
+    def call(self, *, number: str = "", any_time: bool = False) -> Response:
+        from .dialer import DialRefused
+
+        try:
+            result = self.dialer.place(number=number, any_time=bool(any_time))
+        except DialRefused as exc:
+            # 400 rather than 403: the operator is authenticated and permitted,
+            # and what stopped the call is a rule they can change. The message
+            # is the useful part.
+            return Response(400, {"error": str(exc)})
+        return Response(200, result)
+
+
 class Router:
     """Dispatches a route to its handler, enforcing the auth boundary.
 
@@ -828,7 +887,8 @@ class Router:
 def build_router(*, chat: ChatSurface, mic: BrowserMicSurface, admin: AdminSurface,
                  admin_token: str = "", gate_answerer: Callable[[Any], str] | None = None,
                  voice=None, voice_sessions=None, voice_tokens=None,
-                 browser_voice=None, messaging=None, extra_channel=None) -> Router:
+                 browser_voice=None, messaging=None, extra_channel=None,
+                 dialer=None) -> Router:
     """Wire the three surfaces into one router.
 
     ``gate_answerer`` is bound **here, on the server**, and never taken from the
@@ -861,5 +921,21 @@ def build_router(*, chat: ChatSurface, mic: BrowserMicSurface, admin: AdminSurfa
         }))
     else:
         router.register(Route.ADMIN_GATE, lambda: admin.run_gate(gate_answerer))
+
+    if dialer is None:
+        # The page is still served — it is how an operator discovers there is
+        # nothing to dial with — but every action says why it cannot act.
+        unavailable = lambda: Response(503, {  # noqa: E731
+            "unavailable": True,
+            "reason": "no outbound dialer is wired on this instance",
+        })
+        router.register(Route.ADMIN_DIALABLE, unavailable)
+        router.register(Route.ADMIN_DIALABLE_EDIT, unavailable)
+        router.register(Route.ADMIN_CALL, unavailable)
+    else:
+        surface = DialerSurface(dialer=dialer)
+        router.register(Route.ADMIN_DIALABLE, surface.dialable)
+        router.register(Route.ADMIN_DIALABLE_EDIT, surface.edit_dialable)
+        router.register(Route.ADMIN_CALL, surface.call)
 
     return router

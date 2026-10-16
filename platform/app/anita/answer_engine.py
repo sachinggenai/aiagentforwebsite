@@ -705,10 +705,16 @@ class AnswerEngine:
         base.cite(self._product_citation(product))
         return base
 
-    @staticmethod
-    def _product_citation(product, *, source_url: str | None = None) -> dict:
-        """A citation for an answer that came from a corpus row, not a chunk."""
-        return {
+    def _product_citation(self, product, *, source_url: str | None = None) -> dict:
+        """A citation for an answer that came from a corpus row, not a chunk.
+
+        The product's photograph rides along when it has one, attached **here**
+        rather than looked up by whichever page renders the reply. A surface
+        that resolved the image itself would be deciding which product an
+        answer is about, and it would decide wrong: one answer can cite three
+        products, and only this one knows which of them was the subject.
+        """
+        citation = {
             "chunk_id": f"product:{product.product_id}",
             "chunk_type": "product_record",
             "product_id": product.product_id,
@@ -716,6 +722,32 @@ class AnswerEngine:
             "source_url": source_url or product.url or None,
             "content_hash": "",
         }
+        image = self._primary_image(product)
+        if image is not None:
+            citation["image_url"] = image.url
+            # The image's own page, which is not always the product's: a
+            # picture can be documented on a category page while the fact came
+            # from the product page, and provenance that blurs those is not
+            # provenance.
+            citation["image_source_url"] = image.source_url or None
+            if image.alt:
+                citation["image_alt"] = image.alt
+        return citation
+
+    def _primary_image(self, product):
+        """The product's own photograph, or None. Never raises.
+
+        A missing image is a missing decoration, so nothing here may fail an
+        answer — the reply is already composed by the time this runs.
+        """
+        corpus = getattr(self.answers, "corpus", None)
+        if corpus is None:
+            return None
+        try:
+            return corpus.primary_image(product.product_id)
+        except Exception:  # noqa: BLE001 - a picture must not cost an answer
+            logger.exception("could not read the product image; continuing without it")
+            return None
 
     @staticmethod
     def _company_citation(answer, kind: str) -> dict:

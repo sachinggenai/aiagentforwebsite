@@ -112,6 +112,29 @@ class Faq:
     product_id: str | None = None
 
 
+@dataclass(frozen=True)
+class Media:
+    """One image from the source site, and the page it was found on.
+
+    `role` is the field that matters and the one that is easy to get wrong:
+    `primary` is the product's own photograph — exactly one per catalogue
+    product — while `related` is a picture of *some other product* that
+    happened to appear on this product's page. A page-derived gallery cannot
+    tell them apart, which is why `media_manifest.json`'s `images_by_product`
+    must not be used to answer "what does this product look like".
+    """
+
+    url: str
+    role: str = ""
+    variant: str = ""
+    alt: str = ""
+    source_url: str = ""
+
+    @property
+    def is_primary(self) -> bool:
+        return self.role == "primary"
+
+
 @dataclass
 class ProductView:
     """A product plus everything needed to answer about it, with absence explicit.
@@ -207,6 +230,42 @@ class Corpus:
             Faq(question=r["question"], answer=r["answer"], product_id=r["product_id"])
             for r in rows
         ]
+
+    def media_for(self, product_id: str) -> list[Media]:
+        """Every image recorded against a product, the primary one first.
+
+        Matched on `LTRIM(…, '0')` because the `media` table stores product ids
+        **zero-padded** (`00270694`) while `products` and every citation carry
+        them unpadded (`270694`). Plain equality returns nothing here, and the
+        symptom would be "this product has no photograph" rather than a bug.
+        """
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT url, role, variant, alt, source_url FROM media "
+                "WHERE LTRIM(product_id, '0') = LTRIM(?, '0') "
+                "ORDER BY CASE role WHEN 'primary' THEN 0 ELSE 1 END, rowid",
+                (str(product_id),),
+            ).fetchall()
+        return [
+            Media(
+                url=r["url"], role=r["role"] or "", variant=r["variant"] or "",
+                alt=r["alt"] or "", source_url=r["source_url"] or "",
+            )
+            for r in rows
+        ]
+
+    def primary_image(self, product_id: str) -> Media | None:
+        """The product's own photograph, or ``None``.
+
+        ``None`` means this product has no primary image — never "here is the
+        nearest one". All 24 catalogue products have exactly one today, and the
+        reason to return nothing rather than a fallback is so that the day one
+        does not, the page shows nothing instead of another product's picture.
+        """
+        for image in self.media_for(product_id):
+            if image.is_primary:
+                return image
+        return None
 
     def product_view(self, product_id: str) -> ProductView | None:
         """Everything known about one product, with absence stated explicitly."""

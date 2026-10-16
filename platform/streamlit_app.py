@@ -34,6 +34,11 @@ import streamlit as st
 PLATFORM = Path(__file__).resolve().parent
 sys.path.insert(0, str(PLATFORM / "app"))
 
+# The rule for "which product is this answer about" is the server's, not this
+# page's — every surface showing provenance has to agree on it, and a page that
+# worked it out for itself would eventually disagree.
+from anita.surfaces import product_card  # noqa: E402
+
 st.set_page_config(page_title="ANITA MEDICAL SYSTEMS — Product Assistant",
                    page_icon="🩻", layout="centered")
 
@@ -148,6 +153,42 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+def render_card(card: dict) -> None:
+    """The product, its picture, and the page every fact came from.
+
+    Built as one block because the three answer a single question — "where did
+    this come from?" — and a link without the picture, or a picture without the
+    link, answers two thirds of it.
+    """
+    from urllib.parse import urlparse
+
+    with st.container(border=True):
+        columns = st.columns([1, 4], vertical_alignment="center", gap="medium")
+
+        if card.get("image_url"):
+            with columns[0]:
+                try:
+                    # A fixed pixel width, not `width="stretch"`: a column this
+                    # narrow resolves "stretch" to a zero-width box, and an
+                    # image with no box is never fetched — it renders as blank
+                    # space with no error anywhere.
+                    st.image(card["image_url"], width=150)
+                except Exception:  # noqa: BLE001 - a picture must not cost the answer
+                    # The answer stands without it; the link below still says
+                    # where the facts came from.
+                    st.caption("image unavailable")
+
+        with columns[1]:
+            st.markdown(f"**{card['name']}**")
+            # The URL is shown as text as well as being the link, so it can be
+            # read, copied or checked without being clicked — which is the
+            # whole point of showing provenance to somebody deciding whether to
+            # trust an answer.
+            shown = urlparse(card["source_url"]).netloc + urlparse(card["source_url"]).path
+            st.markdown(f"[{shown}]({card['source_url']})")
+            st.caption("Product page on anitamedicalsystems.com")
+
+
 st.title("Product assistant")
 st.caption("Ask about specifications, prices, minimum order quantity or delivery.")
 
@@ -162,6 +203,8 @@ if "messages" not in st.session_state:
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
+        if message.get("card"):
+            render_card(message["card"])
         if message.get("meta"):
             st.caption(message["meta"])
 
@@ -197,11 +240,19 @@ if prompt := st.chat_input("Ask about a product…"):
             bits.append("answered")
         if body.get("intent"):
             bits.append(f"intent: {body['intent']}")
-        if body.get("source_url"):
+
+        card = product_card(body)
+        if card:
+            render_card(card)
+        elif body.get("source_url"):
+            # No product to show, but the answer still came from somewhere.
+            # The card carries this link when there is one, so it is only
+            # printed here when there is not — twice would read as two sources.
             bits.append(f"[source]({body['source_url']})")
+
         meta = " · ".join(bits)
         st.caption(meta)
 
     st.session_state.messages.append(
-        {"role": "assistant", "content": text, "meta": meta}
+        {"role": "assistant", "content": text, "meta": meta, "card": card}
     )

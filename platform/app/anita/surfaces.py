@@ -155,6 +155,41 @@ from .orchestrator import QueueFull  # noqa: F401 - re-exported for callers
 
 
 
+def product_card(body: dict) -> dict | None:
+    """The product an answer was **about**, or ``None`` if it was about none.
+
+    Read from the reply's citations, never inferred from its text. The engine
+    emits exactly one `product_record` citation for the product it resolved,
+    and an answer grounded only on category pages, company records or nothing
+    at all has no such citation — which is why a greeting, a decline, a company
+    fact and a listing all correctly produce no card.
+
+    It has to be *that* citation rather than the first one that looks like a
+    product: asked about the Microbar Enema, the reply cited the Paste and the
+    Powder as well, and picking wrong would put a photograph of a different
+    product under the answer. A picture reads as evidence, so a wrong one is
+    worse than none.
+
+    Lives here rather than in the page because every surface that wants to show
+    provenance must agree on which product the answer was about.
+    """
+    for citation in body.get("grounded_on") or []:
+        if not isinstance(citation, dict):
+            continue
+        if citation.get("chunk_type") != "product_record":
+            continue
+        source = citation.get("source_url")
+        if not source:
+            continue
+        return {
+            "name": citation.get("product_name") or "This product",
+            "product_id": citation.get("product_id"),
+            "image_url": citation.get("image_url"),
+            "source_url": source,
+        }
+    return None
+
+
 class ChatSurface:
     """Web and mobile-web chat. Open to buyers, rate-limited (CV-03)."""
 

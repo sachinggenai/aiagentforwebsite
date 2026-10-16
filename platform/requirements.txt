@@ -60,6 +60,26 @@ audioop-lts>=0.2; python_version >= "3.13"
 # where something else had already pulled it in.
 scipy>=1.11
 
+# --- WebRTC transport (optional) ------------------------------------------
+# US-003's wire replaced: the browser-mic channel over WebRTC instead of a
+# WebSocket carrying frames. Off unless ANITA_WEBRTC_ENABLED is set, and
+# imported lazily, so an instance without it boots and serves every other
+# surface.
+#
+# **Install order matters, and the conflict is a resolver one, not a runtime
+# one.** aiortc's metadata caps `av<18`; this project pins `av>=18,<19` above
+# for the Smart App Control reason recorded there. Measured rather than
+# assumed: aiortc 1.15.0 drives an av 18.1.0 `AudioFrame` through the full
+# conversion path without error, and `scripts/voice_e2e.py --models` still
+# transcribes on CUDA. So install aiortc first, then re-install the av pin:
+#
+#   .venv\Scripts\pip install aiortc
+#   .venv\Scripts\pip install "av>=18,<19"
+#
+# pip will warn about the conflict afterwards. Both work; the warning is the
+# honest record that the metadata disagrees with the behaviour.
+aiortc>=1.15,<2.0
+
 # --- GPU (optional) -------------------------------------------------------
 # torch is deliberately NOT a hard requirement: it is ~2 GB, and a chat-only
 # deployment runs fine without it (`platform_detect._cuda_available()` degrades

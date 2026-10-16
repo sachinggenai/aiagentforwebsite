@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en-IN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ANITA — Voice (WebRTC)</title>
+<style>
+  /* Tokens shared with the chat page, the console and the dialer. */
+  :root {
+    --bg:#0f1319; --panel:#161c24; --panel2:#1d242e; --ink:#e8ecf1; --muted:#8e99a8;
+    --line:#252d38; --brand:#3d9fd0; --ok:#2e9e5b; --warn:#d0932b; --bad:#d0533f;
+    --radius:10px;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f4f6f8; --panel:#fff; --panel2:#eef1f5; --ink:#12161c; --muted:#5b6472;
+            --line:#dfe3e9; --brand:#0b5d8a; --ok:#1e7a45; --warn:#9a6c14; --bad:#b03a28; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  header { display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+           padding:14px 18px; background:var(--panel); border-bottom:1px solid var(--line); }
+  header h1 { font-size:15px; margin:0; font-weight:600; }
+  .spacer { flex:1; }
+  .pill { font-size:11.5px; padding:3px 9px; border-radius:11px; background:var(--panel2);
+          color:var(--muted); border:1px solid var(--line); }
+  .pill.bad { color:var(--bad); } .pill.ok { color:var(--ok); }
+  main { padding:18px; display:grid; gap:18px; max-width:720px; margin:0 auto; }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
+            padding:16px 18px; }
+  h2 { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted);
+       margin:0 0 12px; font-weight:700; }
+  button { font:inherit; background:var(--brand); color:#fff; border:0; border-radius:7px;
+           padding:10px 18px; font-weight:600; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--ink); border:1px solid var(--line); }
+  button:disabled { opacity:.5; cursor:default; }
+  .row { display:flex; align-items:center; gap:10px; padding:7px 0;
+         border-bottom:1px solid var(--line); }
+  .row:last-child { border-bottom:0; }
+  .detail { color:var(--muted); font-size:12.5px; }
+  .err { color:var(--bad); }
+  .ok { color:var(--ok); }
+  pre { background:var(--panel2); border:1px solid var(--line); border-radius:8px;
+        padding:11px; overflow:auto; max-height:200px; margin:10px 0 0; font-size:12.5px;
+        white-space:pre-wrap; word-break:break-word; }
+  .note { background:var(--panel2); border:1px solid var(--line); border-radius:8px;
+          padding:10px 12px; color:var(--muted); font-size:12.5px; margin-top:14px; }
+  audio { width:100%; margin-top:12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Voice — WebRTC</h1>
+  <span class="pill" id="state">idle</span>
+  <span class="spacer"></span>
+  <button id="start">Start</button>
+  <button id="stop" class="ghost" disabled>Stop</button>
+</header>
+
+<main>
+  <section>
+    <h2>Connection</h2>
+    <div class="row"><span class="detail">ICE</span><span class="spacer"></span>
+      <span id="ice" class="detail">—</span></div>
+    <div class="row"><span class="detail">Peer connection</span><span class="spacer"></span>
+      <span id="pc" class="detail">—</span></div>
+    <div class="row"><span class="detail">Ticket</span><span class="spacer"></span>
+      <span id="ticket" class="detail">—</span></div>
+    <div id="error" class="err" style="margin-top:10px"></div>
+    <audio id="remote" autoplay playsinline></audio>
+    <div class="note">
+      This page carries the same assistant as the phone line and the microphone
+      button on the chat page — the same engine, the same catalogue. It is
+      turn-based with interruption: speak, and you can talk over the answer.
+    </div>
+  </section>
+</main>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+let pc = null, stream = null, sessionId = null;
+
+function setState(text, cls) {
+  const el = $("state");
+  el.textContent = text;
+  el.className = "pill" + (cls ? " " + cls : "");
+}
+function fail(message) {
+  $("error").textContent = message;
+  setState("failed", "bad");
+}
+function log(where, value) { $(where).textContent = value; }
+
+async function start() {
+  $("error").textContent = "";
+  $("start").disabled = true;
+  setState("starting");
+
+  try {
+    // A fresh session id per connection. The ticket binds to it, and the
+    // server signs one and checks the other.
+    sessionId = "webrtc-" + Math.random().toString(36).slice(2, 10);
+
+    const ticketRes = await fetch("/api/voice/ticket", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: sessionId }),
+    });
+    if (!ticketRes.ok) {
+      const body = await ticketRes.json().catch(() => ({}));
+      throw new Error(body.reason || body.error || ("ticket HTTP " + ticketRes.status));
+    }
+    const ticket = (await ticketRes.json()).ticket;
+    log("ticket", "issued");
+
+    pc = new RTCPeerConnection();
+    pc.oniceconnectionstatechange = () => {
+      log("ice", pc.iceConnectionState);
+      if (pc.iceConnectionState === "connected") setState("live", "ok");
+      if (pc.iceConnectionState === "failed") {
+        fail("ICE could not find a path. On a restrictive network this is the "
+           + "case a TURN relay exists for.");
+      }
+    };
+    pc.onconnectionstatechange = () => log("pc", pc.connectionState);
+    pc.ontrack = (event) => {
+      // The assistant's voice arrives as a track, not as frames.
+      $("remote").srcObject = event.streams[0];
+    };
+
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+    });
+    stream.getTracks().forEach((t) => pc.addTrack(t, stream));
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    const answerRes = await fetch("/api/voice/webrtc/offer", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: sessionId, ticket: ticket,
+        sdp: pc.localDescription.sdp, type: pc.localDescription.type,
+      }),
+    });
+    if (!answerRes.ok) {
+      const body = await answerRes.json().catch(() => ({}));
+      throw new Error(body.reason || body.error || ("offer HTTP " + answerRes.status));
+    }
+    await pc.setRemoteDescription(await answerRes.json());
+
+    setState("connecting");
+    $("stop").disabled = false;
+  } catch (err) {
+    fail(String(err.message || err));
+    await stop();
+    $("start").disabled = false;
+  }
+}
+
+async function stop() {
+  $("stop").disabled = true;
+  if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
+  if (pc) { pc.close(); pc = null; }
+  $("remote").srcObject = null;
+  log("ice", "—"); log("pc", "—");
+  setState("idle");
+  $("start").disabled = false;
+}
+
+$("start").addEventListener("click", start);
+$("stop").addEventListener("click", stop);
+</script>
+</body>
+</html>

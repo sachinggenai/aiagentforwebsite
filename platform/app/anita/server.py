@@ -374,6 +374,69 @@ def create_app(router: Router, *, title: str = "ANITA MEDICAL SYSTEMS") -> FastA
             else:
                 await relay.close(reason="refused" if relay.refused else "closed")
 
+    # -- WebRTC transport (optional, US-003's wire replaced) ---------------
+    # Registered here rather than through the route table, for the reason the
+    # Twilio ingress is: `Route` values are JSON endpoints dispatched
+    # synchronously through `Router.dispatch`, and this one has to await ICE
+    # gathering before it can answer at all.
+    #
+    # The WebSocket path above is untouched and remains the default. This is a
+    # sibling, off unless the instance asked for it — and it says so rather
+    # than 404ing, because an operator looking for it should find the reason.
+    @app.post("/api/voice/webrtc/offer", include_in_schema=False)
+    async def webrtc_offer(request: Request) -> Any:
+        sessions = getattr(router, "webrtc_sessions", None)
+        if sessions is None:
+            return JSONResponse(status_code=503, content={
+                "unavailable": True,
+                "reason": "WebRTC is not enabled on this instance "
+                          "(set ANITA_WEBRTC_ENABLED=true)",
+            })
+
+        try:
+            payload = await request.json()
+        except Exception:  # noqa: BLE001 - an unparseable body is a bad request
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+
+        session_id = str(payload.get("session_id") or "")
+        if not session_id:
+            return JSONResponse(status_code=400, content={"error": "missing session_id"})
+        if not str(payload.get("sdp") or ""):
+            return JSONResponse(status_code=400, content={"error": "missing sdp"})
+
+        # Same ticket the WebSocket path exchanges in its first frame — one
+        # signer, so the two transports cannot disagree about who may speak.
+        tokens = router.voice_tokens
+        if tokens is None:
+            return JSONResponse(status_code=503, content={
+                "unavailable": True, "reason": "no session signer configured",
+            })
+        from .browser_voice import TokenError
+
+        try:
+            tokens.verify(str(payload.get("ticket") or ""))
+        except TokenError as exc:
+            return JSONResponse(status_code=401,
+                                content={"error": f"ticket {exc.reason}"})
+
+        transport = sessions(session_id)
+        try:
+            answer = await transport.handle_offer(
+                sdp=str(payload["sdp"]), kind=str(payload.get("type") or "offer")
+            )
+        except Exception as exc:  # noqa: BLE001 - a failed offer must not 500 blindly
+            logger.exception("webrtc offer failed")
+            await transport.close(reason="offer_failed")
+            return JSONResponse(status_code=500,
+                                content={"error": type(exc).__name__})
+        return JSONResponse(content=answer)
+
+    @app.get("/webrtc", include_in_schema=False)
+    async def webrtc_page() -> Any:
+        return _page("webrtc.html")
+
     @app.get("/", include_in_schema=False)
     async def chat_page() -> Any:
         return _page("chat.html")

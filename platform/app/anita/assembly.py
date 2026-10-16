@@ -802,6 +802,48 @@ def assemble(
         )
         janitor.start()
 
+    # -- WebRTC transport (optional, off by default) -----------------------
+    # A *sibling* of the browser-mic WebSocket, not a replacement. Nothing
+    # above this line changes when it is enabled, and nothing below it is
+    # reached when it is not — the existing path stays the default.
+    #
+    # `aiortc` is imported inside the factory rather than at the top of this
+    # module, because a box without it must still boot and serve every other
+    # surface. That is the same rule `twilio.rest` follows.
+    webrtc_sessions = None
+    _webrtc_flag = str(settings.env.get("ANITA_WEBRTC_ENABLED", "") or "").strip().lower()
+    if _webrtc_flag in ("1", "true", "yes", "on"):
+        _ice_servers = [
+            url.strip()
+            for url in str(
+                settings.env.get("ANITA_WEBRTC_ICE_SERVERS", "") or ""
+            ).split(",")
+            if url.strip()
+        ]
+        if not _ice_servers:
+            # A STUN server is what makes a NAT'd peer reachable at all. The
+            # spike found `aiortc` supplies one by default; naming it here
+            # instead means the deployment decides, rather than inheriting a
+            # third party's server by accident.
+            _ice_servers = ["stun:stun.l.google.com:19302"]
+        _engine_factory = _voice_session_factory()
+
+        def webrtc_sessions(session_key: str):
+            from .webrtc_voice import WebRTCVoiceSession
+
+            return WebRTCVoiceSession(
+                session=_engine_factory(session_key),
+                session_key=session_key,
+                tokens=voice_tokens,
+                admission=admission,
+                ice_servers=_ice_servers,
+            )
+
+        notes.append(
+            "WebRTC transport enabled — GET /webrtc; the WebSocket browser-mic "
+            "path is unchanged and still the default"
+        )
+
     router = build_router(
         chat=chat,
         mic=BrowserMicSurface(
@@ -822,6 +864,7 @@ def assemble(
         # credentials, so `GET /dialer` can say what is missing rather than
         # 404 — an operator looking for it should find the page that explains
         # itself.
+        webrtc_sessions=webrtc_sessions,
         dialer=OutboundDialer(
             account_sid=account_sid,
             auth_token=twilio_token,

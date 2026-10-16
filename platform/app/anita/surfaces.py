@@ -839,7 +839,7 @@ class Router:
 
     def __init__(self, *, admin_token: str = "", voice=None, voice_sessions=None,
                  voice_tokens=None, browser_voice=None, messaging=None,
-                 extra_channel=None) -> None:
+                 extra_channel=None, webrtc_sessions=None) -> None:
         self.admin_token = admin_token
         self._handlers: dict[Route, Callable[..., Response]] = {}
         self._lock = threading.Lock()
@@ -868,6 +868,13 @@ class Router:
         # by HMAC, and both reply outside the JSON envelope.
         self.messaging = messaging
         self.extra_channel = extra_channel
+        # The WebRTC transport, when an instance has asked for it. A factory
+        # keyed on `session_key`, like `browser_voice` and for the same reason:
+        # a voice session holds one call's audio buffer and VAD state, so two
+        # calls sharing one would produce a transcript that is neither's.
+        # None means the instance has not enabled it, and the route says so
+        # rather than 404ing.
+        self.webrtc_sessions = webrtc_sessions
 
     def register(self, route: Route, handler: Callable[..., Response]) -> None:
         with self._lock:
@@ -923,7 +930,7 @@ def build_router(*, chat: ChatSurface, mic: BrowserMicSurface, admin: AdminSurfa
                  admin_token: str = "", gate_answerer: Callable[[Any], str] | None = None,
                  voice=None, voice_sessions=None, voice_tokens=None,
                  browser_voice=None, messaging=None, extra_channel=None,
-                 dialer=None) -> Router:
+                 dialer=None, webrtc_sessions=None) -> Router:
     """Wire the three surfaces into one router.
 
     ``gate_answerer`` is bound **here, on the server**, and never taken from the
@@ -934,7 +941,8 @@ def build_router(*, chat: ChatSurface, mic: BrowserMicSurface, admin: AdminSurfa
     """
     router = Router(admin_token=admin_token, voice=voice, voice_sessions=voice_sessions,
                     voice_tokens=voice_tokens, browser_voice=browser_voice,
-                    messaging=messaging, extra_channel=extra_channel)
+                    messaging=messaging, extra_channel=extra_channel,
+                    webrtc_sessions=webrtc_sessions)
     router.register(Route.HEALTH, lambda: Response(200, {"status": "ok"}))
     router.register(Route.CHAT_MESSAGE, chat.post_message)
     router.register(Route.CHAT_HISTORY, chat.get_history)

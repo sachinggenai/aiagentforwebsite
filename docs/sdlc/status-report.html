@@ -1,0 +1,363 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ANITA Assistant Status</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=Public+Sans:wght@400;500;600&display=swap">
+<style>
+  /* Layout: one measured column, a summary strip of four figures, then three
+     status bands (working / partly / blocked) with a consistent chip gutter. */
+  :root {
+    --paper: #f6f7f8;
+    --surface: #ffffff;
+    --ink: #16202b;
+    --ink-soft: #55636f;
+    --ink-faint: #7c8894;
+    --rule: #e3e7ea;
+    --rule-soft: #eef1f3;
+    --accent: #0f6d78;
+    --ok: #1d7a52;
+    --ok-bg: #e8f3ee;
+    --warn: #8a5a06;
+    --warn-bg: #f8efdd;
+    --stop: #8c3a3a;
+    --stop-bg: #f6e9e9;
+    --shadow: 0 1px 2px rgba(22, 32, 43, 0.06), 0 8px 24px rgba(22, 32, 43, 0.05);
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper: #10151a;
+      --surface: #171d23;
+      --ink: #e9eef2;
+      --ink-soft: #a7b4bf;
+      --ink-faint: #8593a0;
+      --rule: #2a333c;
+      --rule-soft: #212a32;
+      --accent: #56b8c2;
+      --ok: #63c194;
+      --ok-bg: #16281f;
+      --warn: #dcae5e;
+      --warn-bg: #2a2317;
+      --stop: #dd9393;
+      --stop-bg: #2b1c1c;
+      --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 10px 30px rgba(0, 0, 0, 0.35);
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #10151a;
+    --surface: #171d23;
+    --ink: #e9eef2;
+    --ink-soft: #a7b4bf;
+    --ink-faint: #8593a0;
+    --rule: #2a333c;
+    --rule-soft: #212a32;
+    --accent: #56b8c2;
+    --ok: #63c194;
+    --ok-bg: #16281f;
+    --warn: #dcae5e;
+    --warn-bg: #2a2317;
+    --stop: #dd9393;
+    --stop-bg: #2b1c1c;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 10px 30px rgba(0, 0, 0, 0.35);
+    color-scheme: dark;
+  }
+
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: "Public Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap {
+    max-width: 60rem;
+    margin: 0 auto;
+    padding-block: 3rem 4rem;
+    padding-inline: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 2.75rem;
+  }
+  h1, h2, h3 {
+    font-family: "Source Serif 4", Georgia, "Times New Roman", serif;
+    text-wrap: balance;
+    margin: 0;
+    line-height: 1.2;
+  }
+  h1 { font-size: clamp(1.9rem, 4vw, 2.6rem); font-weight: 600; letter-spacing: -0.01em; }
+  h2 { font-size: 1.35rem; font-weight: 600; }
+  h3 { font-size: 1.02rem; font-weight: 600; font-family: "Public Sans", sans-serif; }
+  p { margin: 0; }
+  a { color: var(--accent); }
+
+  header { display: flex; flex-direction: column; gap: 0.85rem; border-bottom: 2px solid var(--ink); padding-bottom: 1.5rem; }
+  .kicker {
+    font-size: 0.72rem; letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--accent); font-weight: 600;
+  }
+  .lede { font-size: 1.06rem; color: var(--ink-soft); max-width: 46rem; }
+  .stamp { font-size: 0.82rem; color: var(--ink-faint); }
+
+  .figures {
+    display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px;
+    background: var(--rule); border: 1px solid var(--rule); border-radius: 3px; overflow: hidden;
+  }
+  .figure { background: var(--surface); padding: 1rem 1.1rem; display: flex; flex-direction: column; gap: 0.2rem; }
+  .figure b {
+    font-family: "Source Serif 4", Georgia, serif; font-size: 1.7rem; font-weight: 600;
+    font-variant-numeric: tabular-nums; letter-spacing: -0.01em;
+  }
+  .figure span { font-size: 0.8rem; color: var(--ink-soft); line-height: 1.35; }
+
+  section { display: flex; flex-direction: column; gap: 1.1rem; }
+  .band { display: flex; flex-direction: column; gap: 0.1rem; }
+  .band-head { display: flex; align-items: baseline; gap: 0.7rem; flex-wrap: wrap; }
+  .band-note { font-size: 0.88rem; color: var(--ink-faint); }
+
+  .items { display: flex; flex-direction: column; gap: 1px; background: var(--rule-soft); border: 1px solid var(--rule-soft); border-radius: 3px; overflow: hidden; }
+  .item { background: var(--surface); padding: 1rem 1.15rem; display: flex; flex-direction: column; gap: 0.4rem; }
+  .item p { color: var(--ink-soft); font-size: 0.95rem; max-width: 52rem; }
+  .item .why { color: var(--ink-faint); font-size: 0.88rem; }
+  .item .why b { color: var(--ink-soft); font-weight: 600; }
+  .title-row { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+
+  .chip {
+    display: inline-flex; align-items: center; gap: 0.35rem; flex: none;
+    font-size: 0.68rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
+    padding: 0.2rem 0.5rem; border-radius: 999px; border: 1px solid transparent;
+  }
+  .chip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .c-ok { color: var(--ok); background: var(--ok-bg); }
+  .c-warn { color: var(--warn); background: var(--warn-bg); }
+  .c-stop { color: var(--stop); background: var(--stop-bg); }
+
+  .need { display: flex; flex-direction: column; gap: 1px; background: var(--rule); border: 1px solid var(--rule); border-radius: 3px; overflow: hidden; }
+  .ask { background: var(--surface); padding: 1rem 1.15rem; display: grid; grid-template-columns: 1.5rem 1fr; gap: 0.9rem; align-items: start; }
+  .ask .num {
+    font-family: "Source Serif 4", Georgia, serif; font-size: 1.05rem; font-weight: 600;
+    color: var(--accent); font-variant-numeric: tabular-nums; line-height: 1.5;
+  }
+  .ask p { font-size: 0.95rem; color: var(--ink-soft); }
+  .ask strong { color: var(--ink); font-weight: 600; }
+
+  footer { border-top: 1px solid var(--rule); padding-top: 1.2rem; font-size: 0.85rem; color: var(--ink-faint); max-width: 46rem; }
+
+  @media (max-width: 640px) {
+    .wrap { padding-block: 2rem 3rem; gap: 2.25rem; }
+    .figures { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .ask { grid-template-columns: 1fr; gap: 0.35rem; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="kicker">Status for review</div>
+    <h1>ANITA Assistant</h1>
+    <p class="lede">
+      A virtual assistant that answers customer questions about ANITA's products over web chat,
+      messaging and the telephone. It answers only from the ANITA catalogue, never invents a price,
+      and refuses medical questions. Below is what is finished, what is partly finished, and what is
+      blocked, with the reason for each.
+    </p>
+    <p class="stamp">4 October 2026 &middot; prepared from the project's own records</p>
+  </header>
+
+  <div class="figures">
+    <div class="figure"><b>1,163</b><span>automated checks passing, none failing</span></div>
+    <div class="figure"><b>70 / 70</b><span>product answers correct in the fixed quality test</span></div>
+    <div class="figure"><b>15 / 15</b><span>telephone-path checks passing</span></div>
+    <div class="figure"><b>2</b><span>people can be on a call at the same time</span></div>
+  </div>
+
+  <section>
+    <div class="band">
+      <div class="band-head">
+        <h2>Working today</h2>
+        <span class="band-note">built, tested, and reachable by a real user</span>
+      </div>
+    </div>
+    <div class="items">
+      <div class="item">
+        <div class="title-row"><span class="chip c-ok">Working</span><h3>Answering product questions</h3></div>
+        <p>Price, minimum order quantity, delivery time, specifications and side-by-side comparisons,
+           read straight from the ANITA catalogue. Every price is given with the reminder that a
+           formal quotation is required, and a price is never guessed.</p>
+      </div>
+      <div class="item">
+        <div class="title-row"><span class="chip c-ok">Working</span><h3>Web chat</h3></div>
+        <p>Customers can ask questions on the website and get the same answers as anywhere else. The
+           conversation is kept, so a follow-up question still knows which product is being discussed.</p>
+      </div>
+      <div class="item">
+        <div class="title-row"><span class="chip c-ok">Working</span><h3>Messaging (WhatsApp-style)</h3></div>
+        <p>A customer message is read, answered and logged. If the phone network delivers the same
+           message twice, the customer gets one reply, not two.</p>
+      </div>
+      <div class="item">
+        <div class="title-row"><span class="chip c-ok">Working</span><h3>Voice through the website</h3></div>
+        <p>A customer can speak to the assistant through their browser microphone and hear the answer
+           spoken back, with the text chat always one tap away if anything goes wrong.</p>
+      </div>
+      <div class="item">
+        <div class="title-row"><span class="chip c-ok">Working</span><h3>Handing a customer to a person</h3></div>
+        <p>When a customer asks for a human, or the conversation turns negative, the request is
+           recorded and appears in an operator queue instead of being lost.</p>
+      </div>
+      <div class="item">
+        <div class="title-row"><span class="chip c-ok">Working</span><h3>Customer details</h3></div>
+        <p>Names, phone numbers and email addresses are captured once and matched to the right person,
+           so the same buyer is not created twice.</p>
+      </div>
+      <div class="item">
+        <div class="title-row"><span class="chip c-ok">Working</span><h3>Operator console</h3></div>
+        <p>One screen shows whether the service is healthy, what customers have been asking, which
+           escalations are waiting, and any message the carrier refused to deliver.</p>
+      </div>
+      <div class="item">
+        <div class="title-row"><span class="chip c-ok">Working</span><h3>Safety and quality checks</h3></div>
+        <p>The assistant declines medical or diagnostic questions, says so plainly when the catalogue
+           has no information rather than filling the gap, and is held to a fixed set of 70
+           questions that must all pass before a release is allowed.</p>
+      </div>
+      <div class="item">
+        <div class="title-row"><span class="chip c-ok">Working</span><h3>Speed of speech</h3></div>
+        <p>Speech now runs on the machine's graphics card. Speaking an answer is about seven times
+           faster than before, which matters when two calls are in progress at once.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="band">
+      <div class="band-head">
+        <h2>Partly working</h2>
+        <span class="band-note">the product does most of it; one specific thing is missing</span>
+      </div>
+    </div>
+    <div class="items">
+      <div class="item">
+        <div class="title-row"><span class="chip c-warn">Partly</span><h3>The telephone line has never taken a real call</h3></div>
+        <p>Everything on our side is built and tested. An automated test that behaves exactly like the
+           phone network gets a spoken answer back, and the safety checks that stop a runaway call
+           are in place. What has never happened is a real phone ringing and a person speaking.</p>
+        <p class="why"><b>Why:</b> it needs a handset and a live internet link; the phone account will
+           not let us dial our own number, so this one cannot be automated. Interrupting the
+           assistant, a confused caller, and the 30-minute limit on a silent call can only be
+           confirmed by a real person on a real call.</p>
+      </div>
+      <div class="item">
+        <div class="title-row"><span class="chip c-warn">Partly</span><h3>The first call after a restart is slow</h3></div>
+        <p>Roughly seven seconds pass before the assistant speaks on the very first call after the
+           service starts. Every call after that begins instantly.</p>
+        <p class="why"><b>Why:</b> the speech models are loaded into memory on first use. It is a
+           warm-up cost, not a fault, and it disappears once the service has been running.</p>
+      </div>
+      <div class="item">
+        <div class="title-row"><span class="chip c-warn">Partly</span><h3>Telling the sales team by email</h3></div>
+        <p>When a customer asks for a human, the request is recorded and visible in the operator
+           console today. Nobody is sent an email about it yet.</p>
+        <p class="why"><b>Why:</b> the email server details are not configured. This is a setting we
+           need from you, not development work.</p>
+      </div>
+      <div class="item">
+        <div class="title-row"><span class="chip c-warn">Partly</span><h3>WhatsApp as a live channel</h3></div>
+        <p>The ability to receive and answer a WhatsApp message is built and tested end to end. No
+           WhatsApp number is connected to it yet, so no customer can reach it on that channel today.</p>
+        <p class="why"><b>Why:</b> a deliberate sequencing decision. The written answers are being
+           proven on web chat first, then the WhatsApp number is pointed at the same engine.</p>
+      </div>
+      <div class="item">
+        <div class="title-row"><span class="chip c-warn">Partly</span><h3>Follow-up calls to customers</h3></div>
+        <p>The queue that would hold follow-up calls is built. Nothing dials, and no customer is
+           called.</p>
+        <p class="why"><b>Why:</b> switched off on purpose. Calling customers before the legal review
+           finishes is not something we should do, so it stays off until that closes.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="band">
+      <div class="band-head">
+        <h2>Not working, or not started</h2>
+        <span class="band-note">blocked for a reason outside the software</span>
+      </div>
+    </div>
+    <div class="items">
+      <div class="item">
+        <div class="title-row"><span class="chip c-stop">Blocked</span><h3>Public launch</h3></div>
+        <p>The assistant cannot go in front of real customers until the wording it uses to decline
+           medical questions has been reviewed and approved.</p>
+        <p class="why"><b>Why:</b> this is a legal sign-off, not engineering. Until it is given, the
+           launch stays on hold and we do not call customers.</p>
+      </div>
+      <div class="item">
+        <div class="title-row"><span class="chip c-stop">Not started</span><h3>Production setup for scale</h3></div>
+        <p>Today the product runs on a single database file on one machine. That is appropriate for a
+           pilot and for everything demonstrated so far, and it is not the right foundation for a
+           public service with many users.</p>
+        <p class="why"><b>Why:</b> it needs four decisions we have not taken: which database to
+           standardise on, whether to run one server or two, how the catalogue is loaded into it,
+           and where that loading tool lives.</p>
+      </div>
+      <div class="item">
+        <div class="title-row"><span class="chip c-stop">Not started</span><h3>A second messaging provider</h3></div>
+        <p>Adding another channel beyond WhatsApp is designed as a configuration change rather than
+           new development. No additional channel is switched on.</p>
+        <p class="why"><b>Why:</b> waiting on a business decision about which channel is worth
+           adding, not on engineering.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="band">
+      <div class="band-head">
+        <h2>What we need from you</h2>
+      </div>
+    </div>
+    <div class="need">
+      <div class="ask">
+        <div class="num">1</div>
+        <p><strong>Someone to make one test call</strong>, about five minutes, or a phone number we may
+           dial from the assistant. This is the single item holding back the telephone line.</p>
+      </div>
+      <div class="ask">
+        <div class="num">2</div>
+        <p><strong>Legal sign-off</strong> on the sentence the assistant uses when it declines a
+           medical question. This blocks public launch and follow-up calls.</p>
+      </div>
+      <div class="ask">
+        <div class="num">3</div>
+        <p><strong>Email server details</strong> so the sales team is told the moment a customer asks
+           for a person.</p>
+      </div>
+      <div class="ask">
+        <div class="num">4</div>
+        <p><strong>Four decisions on the production setup</strong>: database, one server or two, how
+           the catalogue is loaded, and where that tool lives.</p>
+      </div>
+      <div class="ask">
+        <div class="num">5</div>
+        <p><strong>Three small product decisions</strong> about how the assistant should behave when a
+           customer politely declines a human, how strict the lead qualification should be, and
+           whether one of its thresholds should be adjustable without a code change.</p>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    Figures come from the project's own test runs on 4 October 2026: the full automated suite, the
+    fixed 70-question quality set, and the telephone-path checks. The telephone-path checks were run
+    the same day over a live public link, and pass at 15 of 15 once the speech models are warm.
+  </footer>
+
+</div>
+</body>
+</html>

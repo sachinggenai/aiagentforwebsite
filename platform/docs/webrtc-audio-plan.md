@@ -1,7 +1,10 @@
 # Full-duplex WebRTC audio — an additive plan
 
-> **Status:** plan, nothing built. **Read §2 before costing this** — the runbook line being
-> fixed describes two different things, and only one of them is WebRTC.
+> **Status:** plan. **Phase 0 has been run — see §2a.** Media flows between a browser and this
+> box, and the network position is better than §2 first claimed. The remote half needs one
+> browser on a different network to finish.
+> **Read §1 before costing this** — the runbook line being fixed describes two different
+> things, and only one of them is WebRTC.
 > **Constraint from the request:** additive. The running build keeps working, the existing
 > browser-mic path stays the default, and nothing already demonstrated changes behaviour.
 
@@ -30,20 +33,31 @@ reworded either way.
 That matters because **Phase 1 alone makes the WebRTC claim true**, without touching the
 engine at all — and Phase 2 is where the risk is.
 
-## 2. The blocker is the network, not the code
+## 2. The network — and a correction Phase 0 forced
 
-This is the part to settle before writing any Python.
+> **Revised after the spike. The original claim here was too strong.** It said the server had
+> no inbound reachability and that a relay would therefore be mandatory. Phase 0 measured the
+> candidate set instead of reasoning about it, and the machine **does** offer a public path.
+> See §5a for the numbers. The reasoning below is kept, corrected.
 
-The public ingress is a **Cloudflare quick tunnel** pointing at the API port. It is an
-HTTP/WebSocket tunnel with a random hostname. Two consequences for WebRTC media:
+The public ingress is a **Cloudflare quick tunnel** pointing at the API port — an HTTP/WebSocket
+tunnel with a random hostname. Signalling crosses it fine (HTTPS POST). Media does not: WebRTC
+sends media peer-to-peer over ICE, *not* through the tunnel.
 
-1. **The server has no inbound reachability.** It sits behind the tunnel; there is no public
-   address a browser could send UDP media to. Direct host/STUN candidates cannot work, so
-   ICE would require a **relay**.
-2. **A quick tunnel does not relay UDP.** TURN is therefore not something the existing
-   ingress can stand in for; it is a *separate public endpoint*.
+So the question is not "can the tunnel carry media" (it cannot) but **"can a browser reach this
+machine directly"** — which the spike answered empirically:
 
-So real WebRTC in the demo topology needs one of:
+* The server gathers **`srflx` candidates** — its public IPv4 as seen by a STUN server, on an
+  ephemeral NAT mapping. ICE hole-punching through that is exactly how ordinary WebRTC works on
+  a home or office network, and it often succeeds.
+* The machine also holds **global IPv6 addresses**, where no NAT traversal is needed at all if
+  the peer has IPv6.
+
+Neither is a guarantee. Both depend on the *client's* network, the NAT's type, and whether the
+mapping survives. So the honest position is: **direct connectivity is plausible and unproven**,
+and a relay is the fallback rather than the prerequisite.
+
+If it turns out a relay is needed for the client's network, the options are:
 
 | | What it adds | Notes |
 |---|---|---|
@@ -51,9 +65,33 @@ So real WebRTC in the demo topology needs one of:
 | **A hosted SFU** (LiveKit, Cloudflare Realtime, Daily) | A vendor, an API key, and media leaving your infrastructure | Least operational work, most dependency, per-minute cost |
 | **Direct/LAN only** | Nothing | Works when the browser and the server are on the same network — which covers a client sitting in the room, and *only* that |
 
-**I could not verify the UDP claim in this session** — the search tool was returning errors —
-and it is load-bearing enough that Phase 0 exists to prove it rather than assume it. The
-inbound-reachability argument in (1) does not depend on the UDP question and holds regardless.
+**The UDP claim could not be verified by search in this session** — the tool was erroring —
+which is why Phase 0 measures it rather than assuming it.
+
+## 2a. Phase 0 — what the spike found
+
+Built and run: `aiortc` server + a Chromium client with a fake capture device, in a throwaway
+venv (`%TEMP%\webrtc-spike`). Nothing was wired into ANITA.
+
+| Question | Result |
+|---|---|
+| Does `aiortc` work on this box's Python? | **Yes** — 1.15.0 installs and imports on **Python 3.14.7**. The dependency risk is retired |
+| Does media actually flow? | **Yes** — the server received **313 / 315 audio frames** in two runs, with `iceConnectionState: connected` |
+| What does the server offer a peer? | `host` on `192.168.1.5` (LAN), `host` on `172.22.160.1` (a virtual adapter), `host` on two **global IPv6** addresses (`2401:4900:…`), and **`srflx`** on `106.215.182.198:<ephemeral>` |
+| Does a remote peer work? | **Still unproven** — needs a browser on a different network. See below |
+
+Two things this settles: the transport is buildable here, and the box is **not** unreachable —
+it produces exactly the candidates ordinary WebRTC hole-punching relies on.
+
+Note the `srflx` candidate appeared without a STUN server being configured, because `aiortc`'s
+default ICE configuration already carries one. A real deployment should configure it
+deliberately rather than inherit it.
+
+**The remote half** needs a peer that is not this machine. The spike has been exposed through a
+quick tunnel for exactly that: opening its URL **from a phone on mobile data** (not office
+wi-fi) answers the question in about a minute. If ICE reports `connected` there, no relay is
+needed for the demo and a large part of this plan's cost disappears; if it reports `failed`,
+that is the case for TURN, measured rather than argued.
 
 ## 3. What the engine requires, and why that helps
 

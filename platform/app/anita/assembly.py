@@ -583,7 +583,7 @@ def assemble(
     # The Twilio ingress (US-001): signature, then admission, then TwiML — in
     # that order. Built from the same admission controller the rest of the app
     # uses, so a call refused here is a call the platform knows it refused.
-    from .voice_webhook import VoiceWebhook
+    from .voice_webhook import CallAllowList, VoiceWebhook, greeting_text
 
     # The channel tables (US-001). Best-effort: a platform that cannot open its
     # own database should still answer, and the two protections they carry are
@@ -647,6 +647,22 @@ def assemble(
         instance_id=settings.isolation.db_schema,
         address=voice_number,
         stream_tokens=voice_tokens,
+        # Who this instance may dial, and what it says when someone answers.
+        # The allowlist is read from the deployed environment rather than
+        # passed by whatever places a call, so the guard holds even when the
+        # thing placing the call does not check.
+        allowlist=CallAllowList.from_value(
+            settings.env.get("ANITA_DEMO_CALL_ALLOWLIST", "")
+        ),
+        # Re-read per outbound webhook, so a number added with the dialler is
+        # dialable on the next call rather than the next restart. The boot value
+        # above stays as the fallback for an instance with no file to watch.
+        allowlist_provider=lambda: CallAllowList.from_file(
+            settings.project_root / ".env"
+        ),
+        greeting=greeting_text(
+            settings.identity.agent_name, settings.identity.company_name
+        ),
     )
 
     # -- outbound sends (US-002) -------------------------------------------

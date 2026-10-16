@@ -21,12 +21,133 @@ not a derivation.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from xml.sax.saxutils import escape, quoteattr
 
 logger = logging.getLogger("anita.voice_webhook")
 
 TwiML_HEADER = '<?xml version="1.0" encoding="UTF-8"?>'
 MEDIA_STREAM_PATH = "/twilio/media-stream"
+
+#: Where Twilio fetches the TwiML for a call *we* placed. Shared with
+#: `scripts/demo_call.py` rather than spelled twice: the dialler sets this URL
+#: on the call and the webhook validates the signature against it, so two
+#: copies that drifted would refuse every call the platform made.
+OUTBOUND_PATH = "/twilio/outbound"
+
+#: The configuration key holding the dialable numbers. Named once because three
+#: things read it — the assembly, the file parser, and the dialler that edits
+#: it — and a typo in any one of them would silently disable the guard.
+ALLOWLIST_KEY = "ANITA_DEMO_CALL_ALLOWLIST"
+
+#: The channel kind an outbound stream is recorded under. Kept as a value here
+#: and asserted against `Channel.VOICE_OUTBOUND` in the tests, because two
+#: spellings of one channel name is how a console starts labelling calls with a
+#: kind nothing else recognises.
+VOICE_OUTBOUND_CHANNEL = "voice_outbound"
+
+#: The kind an inbound stream is recorded under, unchanged from before outbound
+#: existed — and the relay's default, which is why the inbound TwiML does not
+#: have to name it.
+VOICE_INBOUND_CHANNEL = "voice_inbound"
+
+#: The voice Twilio says the outbound greeting with. Polly rather than the
+#: local TTS stack, for the same reason the busy message uses it: this is the
+#: line that has to work *before* our engine is on the call at all.
+SAY_VOICE = "Polly.Aditi"
+
+#: What an outbound call opens with.
+#:
+#: There is no spoken greeting anywhere else in the product — an inbound caller
+#: is expected to speak first, and does. An outbound callee who answers to
+#: silence hangs up, so this direction needs one. It names the agent and the
+#: company because an outbound call that does not say who is calling is the one
+#: kind of call nobody wants to receive.
+GREETING_TEMPLATE = (
+    "Hello, this is {agent} from {company}. "
+    "I am calling about your enquiry. How can I help?"
+)
+
+
+def greeting_text(agent: str, company: str) -> str:
+    """The opening line, from configured identity rather than a literal.
+
+    Trailing full stops are stripped before the template re-punctuates: the
+    configured company name ends in `LTD.`, and `LTD.. I am calling` is read
+    aloud by a speech engine as a stumble.
+    """
+    name = (agent or "the product assistant").strip().rstrip(".") or "the product assistant"
+    organisation = (company or "").strip().rstrip(".") or "our team"
+    return GREETING_TEMPLATE.format(agent=name, company=organisation)
+
+
+def normalise_number(number: str) -> str:
+    """Reduce a dialled number to its digits and a leading plus.
+
+    Formatting is not a security boundary, but it is a source of false
+    negatives: a configured list holding `+91 99999 00000` and a webhook
+    delivering `+919999900000` are the same number, and a check that refused
+    one for being typed differently would look like a broken dialler.
+    """
+    return "".join(ch for ch in str(number or "").strip() if ch.isdigit() or ch == "+")
+
+
+class CallAllowList:
+    """The numbers this instance may dial, and nothing else.
+
+    Outbound is the one direction where the platform chooses who to contact,
+    which makes it the one direction that needs a list rather than a rule. The
+    check lives here — in the product — and not only in whatever places the
+    call: a guard that exists solely in a script is one wrong command line away
+    from dialling a stranger, and Twilio's outbound webhook carries the
+    destination the call was placed to, so the decision can be made again, by
+    us, at the moment the callee picks up.
+
+    Empty by default, and **an empty list allows nothing**. Unset means
+    unconfigured, and unconfigured must not quietly mean unrestricted.
+    """
+
+    def __init__(self, numbers=()) -> None:
+        self._numbers = frozenset(
+            value for value in (normalise_number(n) for n in numbers) if value
+        )
+
+    @classmethod
+    def from_value(cls, raw: str) -> "CallAllowList":
+        """Parse the comma-separated configuration value."""
+        return cls(part for part in str(raw or "").split(",") if part.strip())
+
+    @classmethod
+    def from_file(cls, path) -> "CallAllowList":
+        """Read the list from a dotenv-style file.
+
+        The file rather than the value read at boot, because the dialler edits
+        this list between calls: a guard holding its boot snapshot would refuse
+        a number the operator had just added, and that presents as "the dialler
+        is broken" rather than as a stale cache. A missing or unreadable file is
+        an empty list, which allows nothing.
+        """
+        try:
+            text = Path(path).read_text(encoding="utf-8-sig", errors="replace")
+        except OSError:
+            return cls()
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key, _, raw_value = stripped.partition("=")
+            if key.strip() == ALLOWLIST_KEY:
+                return cls.from_value(raw_value.strip().strip('"').strip("'"))
+        return cls()
+
+    def allows(self, number: str) -> bool:
+        return normalise_number(number) in self._numbers
+
+    def __bool__(self) -> bool:
+        return bool(self._numbers)
+
+    def __len__(self) -> int:
+        return len(self._numbers)
 
 # Said when capacity is full. Deliberately not an apology loop: it states what
 # happened, offers the callback, and gets off the line. `AC-4` requires the
@@ -67,7 +188,27 @@ def websocket_url(public_base_url: str) -> str:
     return base + MEDIA_STREAM_PATH
 
 
-def build_stream_twiml(ws_url: str, call_id: str, token: str = "") -> str:
+def _stream_parameters(call_id: str, token: str = "", kind: str = "") -> str:
+    """The `<Parameter>`s the relay reads out of the stream's `start` event."""
+    parameters = f'      <Parameter name="call_id" value={quoteattr(call_id)}/>\n'
+    if token:
+        parameters += f'      <Parameter name="token" value={quoteattr(token)}/>\n'
+    if kind:
+        parameters += f'      <Parameter name="kind" value={quoteattr(kind)}/>\n'
+    return parameters
+
+
+def _connect_block(ws_url: str, parameters: str) -> str:
+    return (
+        "  <Connect>\n"
+        f"    <Stream url={quoteattr(ws_url)}>\n"
+        f"{parameters}"
+        "    </Stream>\n"
+        "  </Connect>\n"
+    )
+
+
+def build_stream_twiml(ws_url: str, call_id: str, token: str = "", kind: str = "") -> str:
     """TwiML that hands the call to our media stream.
 
     `call_id` is passed as a `<Parameter>` so the WebSocket handler learns which
@@ -78,18 +219,42 @@ def build_stream_twiml(ws_url: str, call_id: str, token: str = "") -> str:
     socket is public, and a `call_id` alone is a value anyone can guess or
     read out of a log; the token binds the stream to a webhook run that
     actually took an admission slot (`TAC-5`, `TAC-7`).
+
+    `kind` names the call direction for the relay, which would otherwise record
+    every stream it runs as an inbound one. **The inbound path omits it on
+    purpose**: the relay defaults to `voice_inbound`, so the verified inbound
+    TwiML is byte-for-byte what it was before outbound existed, and only the
+    direction that needs distinguishing pays for it.
     """
-    parameters = f'      <Parameter name="call_id" value={quoteattr(call_id)}/>\n'
-    if token:
-        parameters += f'      <Parameter name="token" value={quoteattr(token)}/>\n'
     return (
         f"{TwiML_HEADER}\n"
         "<Response>\n"
-        "  <Connect>\n"
-        f"    <Stream url={quoteattr(ws_url)}>\n"
-        f"{parameters}"
-        "    </Stream>\n"
-        "  </Connect>\n"
+        f"{_connect_block(ws_url, _stream_parameters(call_id, token, kind))}"
+        "</Response>\n"
+    )
+
+
+def build_outbound_twiml(
+    ws_url: str,
+    call_id: str,
+    token: str = "",
+    greeting: str = "",
+    voice: str = SAY_VOICE,
+) -> str:
+    """TwiML for a call this instance placed, fetched when the callee answers.
+
+    `<Say>` before `<Connect>`, and that order is the entire reason this builder
+    exists separately. The media stream carries the *answer* but never the
+    introduction, so without a line here the person we rang picks up to
+    silence — and the only reasonable response to a silent caller is to hang
+    up.
+    """
+    say = f'  <Say voice="{voice}">{escape(greeting)}</Say>\n' if greeting else ""
+    return (
+        f"{TwiML_HEADER}\n"
+        "<Response>\n"
+        f"{say}"
+        f"{_connect_block(ws_url, _stream_parameters(call_id, token, VOICE_OUTBOUND_CHANNEL))}"
         "</Response>\n"
     )
 
@@ -137,11 +302,27 @@ class VoiceWebhook:
         store=None,
         instance_id: str = "",
         address: str = "",
-        channel_kind: str = "voice_inbound",
+        channel_kind: str = VOICE_INBOUND_CHANNEL,
         stream_tokens=None,
+        allowlist=None,
+        allowlist_provider=None,
+        greeting: str = "",
     ) -> None:
         self.auth_token = auth_token
         self.public_base_url = public_base_url
+        # Who we are allowed to ring. Defaults to an empty list, which permits
+        # nothing — an unconfigured instance must not be a dialler that will
+        # call anywhere.
+        #
+        # `allowlist` is the value read at boot and is the fallback;
+        # `allowlist_provider` is a callable that re-reads the list, and
+        # production wires one so that adding a number to the dialler takes
+        # effect on the next call rather than on the next restart.
+        self.allowlist = allowlist if allowlist is not None else CallAllowList()
+        self.allowlist_provider = allowlist_provider
+        # Said before the media stream connects on a call we placed. Empty is
+        # legitimate (the stream still answers); it is just worse.
+        self.greeting = greeting
         # Mints the token that proves a media stream belongs to an admitted
         # call. Optional so the webhook works without one (tests, and a
         # process that never mints); when absent, no token is emitted and the
@@ -209,6 +390,87 @@ class VoiceWebhook:
 
         return 200, build_stream_twiml(self._ws_url(), call_id, self._stream_token(call_id)), "application/xml"
 
+    def outbound(self, *, params: dict, signature: str | None) -> tuple[int, str, str]:
+        """Handle `POST /twilio/outbound` — the TwiML for a call *we* placed.
+
+        Twilio fetches this when the person we dialled picks up, which makes it
+        the last moment before our engine is on the line, and therefore the
+        last moment at which to decide it should not be. The same three checks
+        as inbound, plus one, in the order that keeps a failure cheap:
+
+        1. **the signature**, against this route's own public URL;
+        2. **the allowlist** — the destination must be one we chose to dial.
+           Checked here as well as wherever the call was placed, because this
+           is the check that cannot be bypassed by whatever placed it;
+        3. **attribution on `From`**, since our number is the one that called;
+        4. replay, admission, then `<Say>` and `<Connect>`.
+
+        A refusal is 403 with an empty body, matching the inbound convention: an
+        error page tells an attacker which check they failed and tells Twilio
+        nothing it can use.
+        """
+        from .channels import SignatureError, validate_twilio_signature
+
+        url = (self.public_base_url or "").rstrip("/") + OUTBOUND_PATH
+        try:
+            validate_twilio_signature(self.auth_token, url, params, signature)
+        except SignatureError:
+            return 403, "", "text/plain"
+
+        call_id = str(params.get("CallSid") or "")
+
+        # The destination is not logged, and neither is the caller: it is
+        # someone's number either way, and `REC-14`/`TAC-8` keep numbers out of
+        # log lines whether the call arrived or was placed.
+        if not self._current_allowlist().allows(str(params.get("To") or "")):
+            logger.warning(
+                "outbound: destination is not on the call allowlist — refusing "
+                "to connect the assistant"
+            )
+            if self.store is not None and call_id:
+                self.store.mark_rejected(call_id, channel_kind=VOICE_OUTBOUND_CHANNEL)
+            return 403, "", "text/plain"
+
+        endpoint = self._attribute(params, on="From")
+        if endpoint is False:
+            if self.store is not None and call_id:
+                self.store.mark_rejected(call_id, channel_kind=VOICE_OUTBOUND_CHANNEL)
+            return 403, "", "text/plain"
+
+        if self.store is not None and call_id:
+            if self.store.claim_event(
+                call_id, channel_kind=VOICE_OUTBOUND_CHANNEL,
+                endpoint_id=(endpoint or {}).get("id"),
+            ) == "duplicate":
+                return 200, f"{TwiML_HEADER}\n<Response/>\n", "application/xml"
+
+        if self.admission is not None:
+            decision = self.admission.admit(call_id)
+            if not decision.admitted:
+                return 200, build_busy_twiml(
+                    getattr(decision, "message", BUSY_MESSAGE) or BUSY_MESSAGE,
+                    self.callback_number,
+                ), "application/xml"
+
+        return 200, build_outbound_twiml(
+            self._ws_url(), call_id, self._stream_token(call_id), self.greeting
+        ), "application/xml"
+
+    def _current_allowlist(self) -> CallAllowList:
+        """The dialable numbers as they stand now, never as they stood at boot.
+
+        A failure to read the list is a **refusal**, not a pass. The one
+        outcome this check must never produce is connecting the assistant to a
+        number nobody approved because the file could not be parsed.
+        """
+        if self.allowlist_provider is None:
+            return self.allowlist
+        try:
+            return self.allowlist_provider()
+        except Exception:  # noqa: BLE001 - unreadable list means no call
+            logger.exception("outbound: could not read the call allowlist — refusing")
+            return CallAllowList()
+
     def _stream_token(self, call_id: str) -> str:
         """The proof the relay requires before it will run this call's stream.
 
@@ -225,21 +487,28 @@ class VoiceWebhook:
             logger.exception("voice webhook: could not mint a stream token")
             return ""
 
-    def _attribute(self, params: dict):
-        """Which endpoint this call arrived on.
+    def _attribute(self, params: dict, on: str = "To"):
+        """Which endpoint this call belongs to.
 
         Returns the endpoint row, or ``None`` when no store is wired (nothing to
         check against), or ``False`` when the number is not ours.
+
+        `on` names the field carrying **our** number, and it differs by
+        direction: `To` for a call that arrived, `From` for one we placed,
+        because on an outbound call `To` is the person we rang. The mistake is
+        not symmetrical — attributing an outbound webhook on `To` compares our
+        number against the callee's and refuses every call we make, which would
+        present as "outbound silently does not work".
         """
         if self.store is None or not self.address:
             return None
-        called = str(params.get("To") or "").strip()
-        if not called:
-            # No `To` at all is not evidence of a foreign number; Twilio always
+        ours = str(params.get(on) or "").strip()
+        if not ours:
+            # No number at all is not evidence of a foreign one; Twilio always
             # sends it, and refusing on its absence would trade a real
             # protection for a new way to drop calls.
             return None
-        if called == self.address:
+        if ours == self.address:
             return self.store.find_endpoint(
                 channel_kind=self.channel_kind,
                 address=self.address,

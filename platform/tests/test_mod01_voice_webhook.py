@@ -488,3 +488,382 @@ class TestTheRoutesAreReachable:
         client = TestClient(create_app(Router()))
         assert client.post("/twilio/voice", data=CALL).status_code == 404
         assert client.post("/twilio/status", data=CALL).status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Outbound demo calls
+#
+# The direction the platform chooses rather than the one it receives. Two
+# things are new and both can fail quietly: who the call is attributed to, and
+# whether the assistant will speak to a number nobody approved.
+# ---------------------------------------------------------------------------
+OURS = "+12792365960"
+CALLEE = "+919999900000"
+#: What Twilio posts for a call we placed: `From` is ours, `To` is theirs —
+#: the exact inverse of an inbound webhook, and the reason `/twilio/voice`
+#: cannot serve this direction.
+OUTBOUND_CALL = {"CallSid": "CA-outbound-1", "From": OURS, "To": CALLEE}
+
+
+def _out_signed(params, path="/twilio/outbound"):
+    return signed_payload(TOKEN, PUBLIC + path, params)
+
+
+def _outbound_hook(admission=None, store=None, allowlist=None):
+    from anita.voice_webhook import CallAllowList
+
+    return VoiceWebhook(
+        auth_token=TOKEN,
+        public_base_url=PUBLIC,
+        admission=admission,
+        callback_number=OURS,
+        store=store,
+        instance_id="anita",
+        address=OURS,
+        allowlist=allowlist if allowlist is not None else CallAllowList([CALLEE]),
+        greeting="Hello, this is Anita Assistant from ANITA MEDICAL SYSTEMS PVT. LTD.",
+    )
+
+
+class TestTheCallAllowList:
+    def test_an_empty_list_allows_nothing(self):
+        """Unset must not mean unrestricted."""
+        from anita.voice_webhook import CallAllowList
+
+        assert not CallAllowList()
+        assert not CallAllowList.from_value("")
+        assert not CallAllowList.from_value("   ,  ,")
+        assert not CallAllowList([]).allows(CALLEE)
+
+    def test_formatting_differences_are_not_a_different_number(self):
+        """A list typed with spaces must still match a webhook's E.164."""
+        from anita.voice_webhook import CallAllowList
+
+        assert CallAllowList.from_value("+91 99999 00000").allows("+919999900000")
+        assert CallAllowList.from_value("+919999900000").allows("+91 99999 00000")
+
+    def test_only_the_listed_numbers_are_allowed(self):
+        from anita.voice_webhook import CallAllowList
+
+        allowlist = CallAllowList.from_value(f"+15550001111,{CALLEE}")
+        assert allowlist.allows(CALLEE)
+        assert not allowlist.allows("+15559999999")
+        assert len(allowlist) == 2
+
+
+class TestTheAllowListIsReadFromTheFile:
+    """The dialler edits `.env` between calls, so the guard reads the file.
+
+    A guard holding its boot snapshot would refuse a number the operator had
+    just added, and that reads as "the dialler is broken" rather than as a
+    stale cache.
+    """
+
+    @staticmethod
+    def _write(tmp_path, body):
+        env = tmp_path / ".env"
+        env.write_text(body, encoding="utf-8")
+        return env
+
+    def test_it_reads_the_key_out_of_a_dotenv_file(self, tmp_path):
+        from anita.voice_webhook import CallAllowList
+
+        env = self._write(tmp_path, f"OTHER=1\nANITA_DEMO_CALL_ALLOWLIST={CALLEE}\n")
+        assert CallAllowList.from_file(env).allows(CALLEE)
+
+    def test_surrounding_quotes_are_tolerated(self, tmp_path):
+        from anita.voice_webhook import CallAllowList
+
+        env = self._write(tmp_path, f'ANITA_DEMO_CALL_ALLOWLIST="{CALLEE}"\n')
+        assert CallAllowList.from_file(env).allows(CALLEE)
+
+    def test_a_commented_key_is_not_a_setting(self, tmp_path):
+        from anita.voice_webhook import CallAllowList
+
+        env = self._write(tmp_path, f"# ANITA_DEMO_CALL_ALLOWLIST={CALLEE}\n")
+        assert not CallAllowList.from_file(env)
+
+    def test_a_missing_file_allows_nothing(self, tmp_path):
+        from anita.voice_webhook import CallAllowList
+
+        assert not CallAllowList.from_file(tmp_path / "nope.env")
+
+    def test_a_file_without_the_key_allows_nothing(self, tmp_path):
+        from anita.voice_webhook import CallAllowList
+
+        env = self._write(tmp_path, "TWILIO_PHONE_NUMBER=+12792365960\n")
+        assert not CallAllowList.from_file(env)
+
+
+class TestTheLiveAllowListProvider:
+    """Production re-reads the list per call; the provider is what does it."""
+
+    def test_a_number_added_after_boot_is_dialable_without_a_restart(self, tmp_path):
+        from anita.voice_webhook import CallAllowList
+
+        env = tmp_path / ".env"
+        env.write_text("ANITA_DEMO_CALL_ALLOWLIST=\n", encoding="utf-8")
+
+        hook = _outbound_hook()
+        hook.allowlist_provider = lambda: CallAllowList.from_file(env)
+
+        # Nothing dialable at boot...
+        status, _, _ = hook.outbound(
+            params=OUTBOUND_CALL, signature=_out_signed(OUTBOUND_CALL)
+        )
+        assert status == 403
+
+        # ...and the dialler adds it. No restart.
+        env.write_text(f"ANITA_DEMO_CALL_ALLOWLIST={CALLEE}\n", encoding="utf-8")
+
+        status, body, _ = hook.outbound(
+            params=OUTBOUND_CALL, signature=_out_signed(OUTBOUND_CALL)
+        )
+        assert status == 200 and "<Stream" in body
+
+    def test_a_provider_that_raises_refuses_rather_than_allows(self):
+        """The one outcome this check must never produce.
+
+        An unreadable list is a refusal. Failing open here would connect the
+        assistant to a number nobody approved at exactly the moment the guard
+        stopped working.
+        """
+        def broken():
+            raise OSError("disk gone")
+
+        hook = _outbound_hook()
+        hook.allowlist_provider = broken
+
+        status, body, _ = hook.outbound(
+            params=OUTBOUND_CALL, signature=_out_signed(OUTBOUND_CALL)
+        )
+        assert status == 403 and body == ""
+
+    def test_without_a_provider_the_boot_value_still_governs(self):
+        """Tests and file-less instances keep the value they were built with."""
+        status, body, _ = _outbound_hook().outbound(
+            params=OUTBOUND_CALL, signature=_out_signed(OUTBOUND_CALL)
+        )
+        assert status == 200
+
+
+class TestTheOutboundChannelName:
+    def test_the_kind_matches_the_channel_enum(self):
+        """Two spellings of one channel name is how a console starts lying.
+
+        `channels.Channel.VOICE_OUTBOUND` is what the channel tables and the
+        console key on; `voice_webhook` cannot import it at module scope
+        without a cycle, so the value is repeated — and pinned here.
+        """
+        from anita.channels import Channel
+        from anita.voice_webhook import VOICE_OUTBOUND_CHANNEL
+
+        assert VOICE_OUTBOUND_CHANNEL == Channel.VOICE_OUTBOUND.value
+
+
+class TestTheOutboundTwiML:
+    def test_the_greeting_is_said_before_the_stream_connects(self):
+        """The whole reason this builder is separate from the inbound one.
+
+        A callee who answers to silence hangs up. `<Say>` must therefore come
+        first, and the order is asserted rather than the presence — both verbs
+        being present in either order would read as correct and behave as
+        broken.
+        """
+        from anita.voice_webhook import build_outbound_twiml
+
+        body = build_outbound_twiml(
+            "wss://anita.example.com/twilio/media-stream", "CA1", "tok", "Hello there."
+        )
+
+        assert body.index("<Say") < body.index("<Connect"), (
+            "the greeting must be spoken before the media stream is connected"
+        )
+        assert "Hello there." in body
+        assert "wss://anita.example.com/twilio/media-stream" in body
+
+    def test_the_stream_declares_the_call_direction(self):
+        """Without this the console files a call we placed as one we received."""
+        from anita.voice_webhook import build_outbound_twiml
+
+        body = build_outbound_twiml("wss://a.example.com/x", "CA1")
+        assert 'name="kind" value="voice_outbound"' in body
+
+    def test_the_inbound_twiML_is_unchanged_by_outbound_existing(self):
+        """The verified inbound path must not pay for the new one."""
+        from anita.voice_webhook import build_stream_twiml
+
+        body = build_stream_twiml("wss://a.example.com/x", "CA1", "tok")
+
+        assert "<Say" not in body
+        assert 'name="kind"' not in body, (
+            "inbound omits the kind on purpose — the relay defaults to it"
+        )
+
+    def test_a_missing_greeting_still_produces_valid_twiML(self):
+        from anita.voice_webhook import build_outbound_twiml
+
+        body = build_outbound_twiml("wss://a.example.com/x", "CA1")
+        assert "<Connect>" in body and "<Say" not in body
+
+    def test_the_greeting_is_xml_escaped(self):
+        """A company name with an ampersand must not break the document."""
+        from anita.voice_webhook import build_outbound_twiml
+        import xml.etree.ElementTree as ET
+
+        body = build_outbound_twiml(
+            "wss://a.example.com/x", "CA1", greeting="Hello from Rao & Sons."
+        )
+        ET.fromstring(body)  # raises if the escape is missing
+
+
+class TestTheOutboundGreeting:
+    def test_it_names_the_agent_and_the_company(self):
+        from anita.voice_webhook import greeting_text
+
+        text = greeting_text("Anita Assistant", "ANITA MEDICAL SYSTEMS PVT. LTD.")
+        assert "Anita Assistant" in text
+        assert "ANITA MEDICAL SYSTEMS PVT. LTD." in text
+        assert "LTD.." not in text, "the trailing stop is doubled by the template"
+
+    def test_it_still_says_something_without_configured_identity(self):
+        from anita.voice_webhook import greeting_text
+
+        text = greeting_text("", "")
+        assert text.strip().endswith("?")
+        assert "{" not in text, "an unformatted placeholder would be spoken aloud"
+
+
+class TestTheOutboundWebhook:
+    def test_an_allowlisted_call_gets_the_greeting_and_a_stream(self):
+        status, body, ctype = _outbound_hook().outbound(
+            params=OUTBOUND_CALL, signature=_out_signed(OUTBOUND_CALL)
+        )
+
+        assert status == 200
+        assert ctype == "application/xml"
+        assert "<Say" in body and "<Stream" in body
+        assert 'value="CA-outbound-1"' in body
+
+    def test_a_number_off_the_list_is_refused_even_with_a_valid_signature(self):
+        """The guard that has to survive whatever placed the call.
+
+        A signature proves Twilio sent this webhook, not that we meant to ring
+        this person.
+        """
+        status, body, _ = _outbound_hook().outbound(
+            params=OUTBOUND_CALL, signature=_out_signed(OUTBOUND_CALL)
+        )
+        assert status == 200, "sanity: this call is allowed"
+
+        stranger = dict(OUTBOUND_CALL, To="+15559999999")
+        status, body, _ = _outbound_hook().outbound(
+            params=stranger, signature=_out_signed(stranger)
+        )
+
+        assert status == 403
+        assert body == ""
+
+    def test_an_empty_allowlist_refuses_every_destination(self):
+        from anita.voice_webhook import CallAllowList
+
+        hook = _outbound_hook(allowlist=CallAllowList())
+        status, body, _ = hook.outbound(
+            params=OUTBOUND_CALL, signature=_out_signed(OUTBOUND_CALL)
+        )
+        assert status == 403 and body == ""
+
+    def test_the_call_is_attributed_on_from_not_to(self):
+        """The inverse of inbound, and the bug this direction exists around.
+
+        On an outbound webhook `To` is the person we rang. Attributing on `To`
+        would compare our number against the callee's and refuse every call the
+        platform ever made — which would present as "outbound just does not
+        work" rather than as a check.
+        """
+        store = self._store()
+
+        status, body, _ = _outbound_hook(store=store).outbound(
+            params=OUTBOUND_CALL, signature=_out_signed(OUTBOUND_CALL)
+        )
+
+        assert status == 200, (
+            "a call we placed was refused — attribution is reading `To`, "
+            "which on this direction is the callee"
+        )
+        assert "<Stream" in body
+
+    def test_a_call_whose_from_is_not_ours_is_refused(self):
+        store = self._store()
+        foreign = dict(OUTBOUND_CALL, From="+15550001111")
+
+        status, body, _ = _outbound_hook(store=store).outbound(
+            params=foreign, signature=_out_signed(foreign)
+        )
+
+        assert status == 403 and body == ""
+        assert store.event_disposition("CA-outbound-1") == "rejected"
+
+    @staticmethod
+    def _store():
+        from anita.channel_store import ChannelStore
+
+        store = ChannelStore(":memory:")
+        store.register_endpoint(
+            channel_kind="voice_inbound", provider="twilio",
+            address=OURS, instance_id="anita", secret_ref="TWILIO_AUTH_TOKEN",
+        )
+        return store
+
+    def test_a_refused_destination_consumes_no_capacity(self):
+        admission = AdmissionController(max_concurrent_calls=1)
+        stranger = dict(OUTBOUND_CALL, To="+15559999999")
+
+        _outbound_hook(admission=admission).outbound(
+            params=stranger, signature=_out_signed(stranger)
+        )
+
+        assert admission.active_calls() == 0
+
+    def test_an_admitted_call_holds_and_then_releases_a_slot(self):
+        admission = AdmissionController(max_concurrent_calls=1)
+        hook = _outbound_hook(admission=admission)
+        hook.outbound(params=OUTBOUND_CALL, signature=_out_signed(OUTBOUND_CALL))
+
+        assert admission.active_calls() == 1
+
+        ended = dict(OUTBOUND_CALL, CallStatus="completed")
+        hook.status(params=ended, signature=_signed(ended, path="/twilio/status"))
+
+        assert admission.active_calls() == 0
+
+    def test_a_replayed_outbound_webhook_gets_no_second_stream(self):
+        store = self._store()
+        hook = _outbound_hook(store=store)
+        hook.outbound(params=OUTBOUND_CALL, signature=_out_signed(OUTBOUND_CALL))
+
+        status, body, _ = hook.outbound(
+            params=OUTBOUND_CALL, signature=_out_signed(OUTBOUND_CALL)
+        )
+
+        assert status == 200
+        assert "<Stream" not in body
+
+    def test_the_outbound_route_is_served(self):
+        from fastapi.testclient import TestClient
+
+        from anita.server import create_app
+        from anita.surfaces import Router
+
+        router = Router()
+        router.voice = _outbound_hook()
+        client = TestClient(create_app(router))
+
+        response = client.post(
+            "/twilio/outbound",
+            data=OUTBOUND_CALL,
+            headers={"X-Twilio-Signature": _out_signed(OUTBOUND_CALL)},
+        )
+
+        assert response.status_code == 200
+        assert "<Stream" in response.text

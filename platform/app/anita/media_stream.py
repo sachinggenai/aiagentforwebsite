@@ -77,6 +77,11 @@ class TwilioMediaStream:
         self.stream_sid = ""
         self.call_id = ""
         self.caller = ""
+        #: Which direction this call ran in. Defaulted to inbound here so a
+        #: relay driven directly (tests, harnesses) behaves exactly as it did
+        #: before outbound existed; `_on_start` overwrites it only when the
+        #: TwiML named a kind.
+        self.channel_kind = "voice_inbound"
 
         self._started = False
         self._closed = False
@@ -149,6 +154,13 @@ class TwilioMediaStream:
         params = start.get("customParameters") or {}
         self.call_id = str(params.get("call_id") or start.get("callSid") or "")
         self.caller = str(start.get("from") or "")
+        # Which direction the call ran in, as the TwiML declared it. The
+        # inbound builder omits the parameter, so inbound streams keep the
+        # default and are recorded exactly as they always were; only an
+        # outbound stream arrives naming itself, because a call the platform
+        # placed being filed as one it received is a console that lies about
+        # the one thing this route was added to show.
+        self.channel_kind = str(params.get("kind") or "voice_inbound")
 
         # §8.6: the socket is public and Twilio is not the only thing that can
         # open one. Before any audio is fed, this stream must present the token
@@ -169,7 +181,7 @@ class TwilioMediaStream:
         if hasattr(self.session, "caller"):
             self.session.caller = self.caller
         if hasattr(self.session, "channel_kind"):
-            self.session.channel_kind = "voice_inbound"
+            self.session.channel_kind = self.channel_kind
 
         # The session row is keyed on the stream SID, not the phone number: a
         # caller who withholds their number has no other stable identity for
@@ -178,7 +190,7 @@ class TwilioMediaStream:
         if self.store is not None and self.stream_sid:
             try:
                 self.store.open_session(
-                    channel_kind="voice_inbound", session_key=self.stream_sid
+                    channel_kind=self.channel_kind, session_key=self.stream_sid
                 )
             except Exception:  # noqa: BLE001 - bookkeeping must not drop a call
                 logger.exception("media stream: could not open the session row")
@@ -449,7 +461,7 @@ class TwilioMediaStream:
         if self.store is not None and self.stream_sid:
             try:
                 self.store.close_session(
-                    channel_kind="voice_inbound", session_key=self.stream_sid
+                    channel_kind=self.channel_kind, session_key=self.stream_sid
                 )
             except Exception:  # noqa: BLE001 - teardown must not raise
                 logger.exception("media stream: could not close the session row")

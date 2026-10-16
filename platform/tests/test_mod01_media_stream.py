@@ -63,6 +63,10 @@ class FakeSession:
     def __init__(self, *, end_after=1, verdict=FRAME_LISTENING, audio=None,
                  chunk_sink_used=False, transcript="caller asked about the gel"):
         self.call_id = ""
+        # Mirrors VoiceCallSession (`voice.py`), which carries the call
+        # direction to the lead and conversation it writes. A fake without it
+        # would make the relay's `hasattr` guard look like dead code.
+        self.channel_kind = "voice_inbound"
         self.end_after = end_after
         self.verdict = verdict
         self.audio = audio if audio is not None else [b"\x7f" * 160] * 2
@@ -751,6 +755,78 @@ class TestTheSessionRow:
         asyncio.run(relay.handle_message(json.dumps(_start())))
         asyncio.run(relay.handle_message(json.dumps(_start())))
         assert len(store.open_sessions()) == 1
+
+
+class TestTheCallDirection:
+    """Which way a call ran, as the TwiML declared it.
+
+    The inbound builder omits the parameter, so an inbound stream must behave
+    exactly as it did before outbound existed. An outbound stream names itself,
+    because a call the platform placed being filed as one it received is a
+    console that misreports the one thing the outbound route was added to show.
+    """
+
+    @staticmethod
+    def _store():
+        from anita.channel_store import ChannelStore
+
+        return ChannelStore(":memory:")
+
+    def test_an_inbound_stream_defaults_to_inbound(self):
+        relay, _ = _relay()
+        asyncio.run(relay.handle_message(json.dumps(_start())))
+
+        assert relay.channel_kind == "voice_inbound"
+
+    def test_an_inbound_stream_opens_an_inbound_session(self):
+        store = self._store()
+        relay, _ = _relay()
+        relay.store = store
+        asyncio.run(relay.handle_message(json.dumps(_start())))
+
+        assert store.find_session(channel_kind="voice_inbound", session_key=STREAM_SID)
+
+    def test_an_outbound_stream_is_recorded_as_outbound(self):
+        store = self._store()
+        relay, _ = _relay()
+        relay.store = store
+        asyncio.run(
+            relay.handle_message(
+                json.dumps(_start(customParameters={"kind": "voice_outbound"}))
+            )
+        )
+
+        assert relay.channel_kind == "voice_outbound"
+        assert store.find_session(
+            channel_kind="voice_outbound", session_key=STREAM_SID
+        ), "an outbound call was filed as an inbound one"
+
+    def test_the_direction_reaches_the_engine_session(self):
+        """The session carries it, so the trace and the conversation agree."""
+        session = FakeSession(end_after=99)
+        relay, _ = _relay(session)
+        asyncio.run(
+            relay.handle_message(
+                json.dumps(_start(customParameters={"kind": "voice_outbound"}))
+            )
+        )
+
+        assert session.channel_kind == "voice_outbound"
+
+    def test_close_closes_the_row_under_the_same_direction(self):
+        store = self._store()
+        relay, _ = _relay()
+        relay.store = store
+        asyncio.run(
+            relay.handle_message(
+                json.dumps(_start(customParameters={"kind": "voice_outbound"}))
+            )
+        )
+        asyncio.run(relay.close(reason="disconnect"))
+
+        assert store.open_sessions() == [], (
+            "teardown closed the wrong kind of session, leaving the outbound row open"
+        )
 
     def test_close_closes_the_session(self):
         store = self._store()

@@ -156,7 +156,14 @@ def create_app(router: Router, *, title: str = "ANITA MEDICAL SYSTEMS") -> FastA
             params = {str(key): str(value) for key, value in form.items()}
             signature = request.headers.get("x-twilio-signature")
 
-            handler = webhook.voice if kind == "voice" else webhook.status
+            handler = {
+                "voice": webhook.voice,
+                "status": webhook.status,
+                # The call direction the platform chose rather than the one it
+                # received. Same ingress, same signature, same TwiML answer —
+                # Twilio fetches this when the person we dialled picks up.
+                "outbound": webhook.outbound,
+            }[kind]
             status, body, content_type = handler(params=params, signature=signature)
             return RawResponse(
                 content=body, status_code=status, media_type=content_type
@@ -169,6 +176,10 @@ def create_app(router: Router, *, title: str = "ANITA MEDICAL SYSTEMS") -> FastA
         @app.post("/twilio/status", include_in_schema=False)
         async def twilio_status(request: Request) -> Any:
             return await _handle_twilio(request, "status")
+
+        @app.post("/twilio/outbound", include_in_schema=False)
+        async def twilio_outbound(request: Request) -> Any:
+            return await _handle_twilio(request, "outbound")
 
     # -- Twilio messaging (US-002) -----------------------------------------
     # Same shape as the voice webhook — raw form, signature header, a tuple

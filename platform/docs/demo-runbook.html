@@ -1,0 +1,816 @@
+<title>ANITA Demo Runbook</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+  /* ---------------------------------------------------------------------
+     Field manual for running the client demo.
+     Layout: single column, numbered stages (the order is real), tables for
+     the capability matrix, status pills carrying demo-readiness semantics.
+     --------------------------------------------------------------------- */
+  :root {
+    --ground:      #f7f8f8;
+    --surface:     #ffffff;
+    --surface-alt: #eef1f2;
+    --ink:         #16201f;
+    --ink-soft:    #56645f;
+    --ink-faint:   #8a9995;
+    --rule:        #d8dedd;
+    --rule-soft:   #e8ecec;
+    --accent:      #0d6e63;
+    --accent-soft: #e2efec;
+    --ok:          #1f6f43;
+    --ok-bg:       #e4f1e8;
+    --warn:        #8a5a12;
+    --warn-bg:     #f7ecd8;
+    --stop:        #9c2f2b;
+    --stop-bg:     #f7e4e2;
+    --shadow:      0 1px 2px rgba(22, 32, 31, .06), 0 8px 24px -12px rgba(22, 32, 31, .18);
+
+    --f-display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+    --f-body:    "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+    --f-mono:    "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+
+    --step: clamp(1.05rem, 0.98rem + 0.35vw, 1.28rem);
+    --measure: 68ch;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:      #0f1615;
+      --surface:     #161e1d;
+      --surface-alt: #1d2624;
+      --ink:         #e8eeec;
+      --ink-soft:    #a3b2ad;
+      --ink-faint:   #7b8a86;
+      --rule:        #2c3735;
+      --rule-soft:   #232d2b;
+      --accent:      #4fc7b4;
+      --accent-soft: #14312d;
+      --ok:          #6ec48b;
+      --ok-bg:       #16301f;
+      --warn:        #e0b166;
+      --warn-bg:     #33280f;
+      --stop:        #e88a83;
+      --stop-bg:     #351b19;
+      --shadow:      0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px -12px rgba(0, 0, 0, .6);
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:      #0f1615;
+    --surface:     #161e1d;
+    --surface-alt: #1d2624;
+    --ink:         #e8eeec;
+    --ink-soft:    #a3b2ad;
+    --ink-faint:   #7b8a86;
+    --rule:        #2c3735;
+    --rule-soft:   #232d2b;
+    --accent:      #4fc7b4;
+    --accent-soft: #14312d;
+    --ok:          #6ec48b;
+    --ok-bg:       #16301f;
+    --warn:        #e0b166;
+    --warn-bg:     #33280f;
+    --stop:        #e88a83;
+    --stop-bg:     #351b19;
+    --shadow:      0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px -12px rgba(0, 0, 0, .6);
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--f-body);
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    padding-block: 0 clamp(3rem, 8vw, 6rem);
+  }
+
+  .wrap {
+    max-width: 60rem;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: clamp(2rem, 4vw, 3.25rem);
+  }
+
+  /* ---------- masthead ---------- */
+  .masthead {
+    border-bottom: 2px solid var(--ink);
+    padding-block: clamp(2rem, 5vw, 3.25rem) 1.1rem;
+    display: flex;
+    flex-direction: column;
+    gap: .9rem;
+  }
+  .eyebrow {
+    font-family: var(--f-mono);
+    font-size: .72rem;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    display: flex;
+    flex-wrap: wrap;
+    gap: .5rem 1.25rem;
+  }
+  h1 {
+    font-family: var(--f-display);
+    font-weight: 700;
+    font-size: clamp(2rem, 1.3rem + 3.2vw, 3.1rem);
+    line-height: 1.02;
+    letter-spacing: -.022em;
+    margin: 0;
+    text-wrap: balance;
+  }
+  .standfirst {
+    font-size: clamp(1rem, .95rem + .3vw, 1.12rem);
+    color: var(--ink-soft);
+    max-width: var(--measure);
+    margin: 0;
+  }
+
+  /* ---------- sections ---------- */
+  section { display: flex; flex-direction: column; gap: 1.1rem; }
+  .sec-head {
+    display: flex;
+    align-items: baseline;
+    gap: .8rem;
+    border-bottom: 1px solid var(--rule);
+    padding-bottom: .55rem;
+  }
+  .sec-num {
+    font-family: var(--f-mono);
+    font-size: .78rem;
+    font-weight: 500;
+    color: var(--accent);
+    letter-spacing: .06em;
+    flex: none;
+  }
+  h2 {
+    font-family: var(--f-display);
+    font-weight: 600;
+    font-size: var(--step);
+    letter-spacing: -.012em;
+    margin: 0;
+    text-wrap: balance;
+  }
+  h3 {
+    font-family: var(--f-display);
+    font-weight: 600;
+    font-size: 1rem;
+    letter-spacing: -.005em;
+    margin: 0;
+  }
+  p { margin: 0; max-width: var(--measure); }
+  .lede { color: var(--ink-soft); }
+  a { color: var(--accent); }
+
+  /* ---------- status pills ---------- */
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: .4rem;
+    font-family: var(--f-mono);
+    font-size: .7rem;
+    font-weight: 500;
+    letter-spacing: .05em;
+    text-transform: uppercase;
+    padding: .2rem .5rem;
+    border-radius: 3px;
+    white-space: nowrap;
+    flex: none;
+  }
+  .pill::before {
+    content: "";
+    width: .42rem; height: .42rem;
+    border-radius: 50%;
+    background: currentColor;
+    flex: none;
+  }
+  .p-ready { color: var(--ok);   background: var(--ok-bg); }
+  .p-setup { color: var(--warn); background: var(--warn-bg); }
+  .p-stop  { color: var(--stop); background: var(--stop-bg); }
+
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .6rem;
+    padding: .85rem 1rem;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 2px;
+  }
+
+  /* ---------- cards ---------- */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 2px;
+    padding: clamp(1rem, 2.5vw, 1.4rem);
+    display: flex;
+    flex-direction: column;
+    gap: .85rem;
+    min-width: 0;
+  }
+
+  .callout {
+    border-left: 3px solid var(--rule);
+    background: var(--surface-alt);
+    padding: .85rem 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: .4rem;
+    border-radius: 0 2px 2px 0;
+  }
+  .callout.warn { border-left-color: var(--warn); background: var(--warn-bg); }
+  .callout.stop { border-left-color: var(--stop); background: var(--stop-bg); }
+  .callout.good { border-left-color: var(--ok);   background: var(--ok-bg); }
+  .callout p { max-width: none; }
+  .callout .ctitle {
+    font-family: var(--f-mono);
+    font-size: .72rem;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+  }
+  .callout.warn .ctitle { color: var(--warn); }
+  .callout.stop .ctitle { color: var(--stop); }
+  .callout.good .ctitle { color: var(--ok); }
+
+  /* ---------- code ---------- */
+  pre {
+    font-family: var(--f-mono);
+    font-size: .82rem;
+    line-height: 1.65;
+    background: var(--surface-alt);
+    border: 1px solid var(--rule);
+    border-radius: 2px;
+    padding: .8rem .9rem;
+    margin: 0;
+    overflow-x: auto;
+    color: var(--ink);
+  }
+  code {
+    font-family: var(--f-mono);
+    font-size: .86em;
+    background: var(--surface-alt);
+    padding: .1rem .32rem;
+    border-radius: 2px;
+    overflow-wrap: anywhere;
+  }
+  pre code { background: none; padding: 0; font-size: 1em; }
+
+  /* ---------- tables ---------- */
+  .tscroll { overflow-x: auto; border: 1px solid var(--rule); border-radius: 2px; background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; font-size: .88rem; min-width: 34rem; }
+  th, td { text-align: left; padding: .6rem .75rem; border-bottom: 1px solid var(--rule-soft); vertical-align: top; }
+  th {
+    font-family: var(--f-mono);
+    font-size: .7rem;
+    letter-spacing: .09em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    font-weight: 500;
+    background: var(--surface-alt);
+    border-bottom-color: var(--rule);
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+  /* ---------- checklists ---------- */
+  ul.check { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .55rem; }
+  ul.check > li {
+    display: flex;
+    gap: .7rem;
+    align-items: flex-start;
+    min-width: 0;
+  }
+  ul.check > li::before {
+    content: "";
+    flex: none;
+    width: .85rem; height: .85rem;
+    margin-top: .38rem;
+    border: 1.5px solid var(--ink-faint);
+    border-radius: 2px;
+  }
+  ul.plain { margin: 0; padding-left: 1.15rem; display: flex; flex-direction: column; gap: .4rem; max-width: var(--measure); }
+  ul.plain li::marker { color: var(--accent); }
+
+  /* ---------- acts ---------- */
+  .act { display: flex; flex-direction: column; gap: 1rem; }
+  .act-head {
+    display: flex;
+    align-items: center;
+    gap: .75rem;
+    flex-wrap: wrap;
+  }
+  .act-n {
+    font-family: var(--f-mono);
+    font-size: .74rem;
+    font-weight: 500;
+    color: var(--surface);
+    background: var(--accent);
+    padding: .2rem .5rem;
+    border-radius: 2px;
+    letter-spacing: .06em;
+    flex: none;
+  }
+  .kv { display: flex; flex-direction: column; gap: .3rem; }
+  .kv dt {
+    font-family: var(--f-mono);
+    font-size: .68rem;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+  }
+  .kv dd { margin: 0 0 .5rem; }
+
+  .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr)); gap: 1rem; }
+  .grid2 > * { min-width: 0; }
+
+  blockquote {
+    margin: 0;
+    padding: .7rem .9rem;
+    border-left: 3px solid var(--accent);
+    background: var(--accent-soft);
+    font-family: var(--f-mono);
+    font-size: .82rem;
+    line-height: 1.6;
+    overflow-x: auto;
+  }
+
+  footer {
+    border-top: 1px solid var(--rule);
+    padding-top: 1rem;
+    color: var(--ink-faint);
+    font-size: .82rem;
+    font-family: var(--f-mono);
+    display: flex;
+    flex-direction: column;
+    gap: .35rem;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <div class="eyebrow">
+      <span>ANITA Medical Systems</span>
+      <span>Operator runbook</span>
+      <span>Prepared 16 Oct 2026</span>
+    </div>
+    <h1>Client Demo Runbook</h1>
+    <p class="standfirst">Everything needed to run the five-surface demo end to end — what to start, what to say, what to avoid, and the parts that will not work if you are asked for them.</p>
+  </header>
+
+  <div class="legend">
+    <span class="pill p-ready">Works today</span>
+    <span class="pill p-setup">Needs a manual step</span>
+    <span class="pill p-stop">Cannot be demoed</span>
+  </div>
+
+  <!-- ================================================================ -->
+  <section>
+    <div class="sec-head">
+      <span class="sec-num">01</span>
+      <h2>Pre-flight — finish this before the client is in the room</h2>
+    </div>
+    <p class="lede">Five of these are things that quietly produce a broken demo rather than an error message. None takes more than two minutes.</p>
+
+    <div class="card">
+      <ul class="check">
+        <li><span><strong>Start the stack</strong> (Section 02). The launcher mints a new public hostname every run, so do this the same day, not the day before.</span></li>
+        <li><span><strong>Re-point the WhatsApp sender webhook</strong> in the Twilio Console. This is the one step the launcher cannot do for you — see Act 04. It goes stale on every restart.</span></li>
+        <li><span><strong>Get the client onto the WhatsApp sandbox</strong> first. Their phone must send the join code before they can message the assistant at all. Do this before the demo, not during it.</span></li>
+        <li><span><strong>Warm the voice path with one test call.</strong> The first call after a restart takes about 7.5 seconds to produce audio while the speech models load. Warm, it is immediate. Never let the client's call be the first one.</span></li>
+        <li><span><strong>Confirm voice is actually available — at demo time, not just at boot.</strong> The launcher checks the graphics card once. A monitor re-samples it every five seconds and will shed voice on its own if free memory drops. When it does, every call is refused as busy while chat keeps working, so the stack looks healthy and only the voice half is dead.</span></li>
+        <li><span><strong>Decide your prose questions.</strong> See the caution in Act 02 — open-ended prose is the slowest path on this box.</span></li>
+        <li><span><strong>Open the console in a second tab</strong> and keep it ready. It is what turns "the assistant answered" into "and here is the record of it".</span></li>
+      </ul>
+    </div>
+
+    <div class="callout stop">
+      <span class="ctitle">Voice is the one capability that can vanish after a clean start</span>
+      <p>The instance shares its graphics card with a sibling product's language models. A capacity monitor samples the card every few seconds and walks a ladder down when free memory falls below a configured floor — voice first, then speech recognition, then the text path. Once voice is shed, calls are answered with a busy message and the microphone returns an error, while chat carries on perfectly normally. Nothing in the console log says "voice is off"; it says the lines are busy.</p>
+      <p>Check it before the demo. Open a terminal and run <code>nvidia-smi --query-gpu=memory.free --format=csv,noheader</code>. Below <strong>6000 MiB</strong> means the ladder has shed voice or is about to. Freeing it means unloading whatever holds the card — usually Ollama models, which is the sibling product's working set, so that is somebody else's call, not a routine step. <code>ollama ps</code> lists what is loaded, and the ladder climbs back on its own about thirty seconds after memory is freed.</p>
+    </div>
+
+    <div class="callout warn">
+      <span class="ctitle">The second most likely thing to go wrong</span>
+      <p>The WhatsApp inbound webhook is a <em>sender</em> setting in the Twilio Console, not a number setting. The launcher updates the voice webhooks automatically and only <em>prints</em> the WhatsApp one. Re-run the stack and the printed URL changes — if you do not paste the new one into the Console, WhatsApp silently stops replying. Nothing errors. Messages just go nowhere.</p>
+    </div>
+  </section>
+
+  <!-- ================================================================ -->
+  <section>
+    <div class="sec-head">
+      <span class="sec-num">02</span>
+      <h2>Start the stack</h2>
+    </div>
+
+    <pre><code>cd D:\project\anitamedicalsystems\platform
+.\start_services.ps1</code></pre>
+
+    <p>That is the whole command. It runs preflight, mints a Cloudflare tunnel for the API, writes <code>TUNNEL_HOST</code>, starts the API, re-points the Twilio voice webhooks, then starts the Streamlit chat with a <strong>second</strong> tunnel of its own. Re-running it is the restart path — it clears stale port holders first.</p>
+
+    <div class="callout">
+      <span class="ctitle">Every URL you need is written to disk</span>
+      <p>The run prints both public hostnames and also saves them to <code>platform\logs\urls.txt</code>. Quick-tunnel hostnames change on every restart, so read them from there rather than reusing a link from an earlier run — an old link is dead, not slow.</p>
+    </div>
+
+    <div class="grid2">
+      <div class="card">
+        <h3>Full demo — public</h3>
+        <p>The command above. Both chat surfaces get a public <code>https://…trycloudflare.com</code> address, and the phone number routes to this instance.</p>
+        <p class="lede" style="font-size:.88rem">Use this when the client is remote, or when you want their phone to reach the assistant.</p>
+      </div>
+      <div class="card">
+        <h3>Local only — safe</h3>
+        <pre><code>.\start_services.ps1 -Local</code></pre>
+        <p>No tunnel, nothing published, Twilio untouched. Both chat surfaces answer on <code>127.0.0.1</code>.</p>
+        <p class="lede" style="font-size:.88rem">Use this for a screen-share demo. The client sees everything and nothing of yours is on the internet.</p>
+      </div>
+    </div>
+
+    <p>To leave the chat surface out entirely, add <code>-NoStreamlit</code>.</p>
+  </section>
+
+  <!-- ================================================================ -->
+  <section>
+    <div class="sec-head">
+      <span class="sec-num">03</span>
+      <h2>The five surfaces</h2>
+    </div>
+
+    <div class="tscroll">
+      <table>
+        <thead>
+          <tr><th>Surface</th><th>Where</th><th>Status</th><th>What it proves</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Streamlit chat</td>
+            <td>Second public URL, from <code>urls.txt</code></td>
+            <td><span class="pill p-ready">Works today</span></td>
+            <td>The fastest way to judge answer quality. Sidebar shows what is running.</td>
+          </tr>
+          <tr>
+            <td>Web chat page</td>
+            <td><code>https://&lt;api-host&gt;/</code></td>
+            <td><span class="pill p-ready">Works today</span></td>
+            <td>The buyer-facing product page, responsive, with the microphone control.</td>
+          </tr>
+          <tr>
+            <td>Browser audio</td>
+            <td>Microphone button on the web chat page</td>
+            <td><span class="pill p-ready">Works today</span></td>
+            <td>Speech in, speech out, same engine as the phone line.</td>
+          </tr>
+          <tr>
+            <td>WhatsApp</td>
+            <td>The Twilio sandbox sender</td>
+            <td><span class="pill p-setup">Needs setup</span></td>
+            <td>Answers on the channel the buyer already uses.</td>
+          </tr>
+          <tr>
+            <td>Phone call</td>
+            <td><code>+12792365960</code></td>
+            <td><span class="pill p-setup">Needs setup</span></td>
+            <td>The full voice pipeline over a real carrier.</td>
+          </tr>
+          <tr>
+            <td>Outbound call</td>
+            <td>One command, to a number you approved</td>
+            <td><span class="pill p-setup">Needs setup</span></td>
+            <td>The assistant rings <em>you</em> and opens the conversation itself.</td>
+          </tr>
+          <tr>
+            <td>Operator console</td>
+            <td><code>https://&lt;api-host&gt;/console</code></td>
+            <td><span class="pill p-ready">Works today</span></td>
+            <td>Conversations, escalations and sends — the audit trail behind the demo.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p class="lede">Suggested order: open on the Streamlit chat, move to the web page for the microphone, then WhatsApp, then finish on the phone call. Voice is the strongest moment and the one with the most that can go wrong — do it with everything else already proven.</p>
+  </section>
+
+  <!-- ================================================================ -->
+  <section>
+    <div class="sec-head">
+      <span class="sec-num">04</span>
+      <h2>The demo, act by act</h2>
+    </div>
+
+    <!-- Act 1 -->
+    <div class="card act">
+      <div class="act-head">
+        <span class="act-n">ACT 01</span>
+        <h3>Streamlit chat</h3>
+        <span class="pill p-ready">Works today</span>
+      </div>
+      <p>Open the Streamlit URL from <code>logs\urls.txt</code>. Ask a price question and let the answer land before you explain anything.</p>
+      <blockquote>What is the price of the ultrasound gel?</blockquote>
+      <p>Point at the line under the answer — it names the intent, says the answer was grounded in the catalogue, and links to the source page. Then point at the sidebar: it reports how many corpus chunks are indexed and whether the dense retrieval leg is live. A system that hides its own degradation is one you cannot trust; this one tells you.</p>
+      <div class="callout good">
+        <span class="ctitle">The line worth saying out loud</span>
+        <p>Prices are never generated by the model. They are read from the product database and the quotation caveat is appended in the same function that produces the figure, so there is no code path that yields a price without it.</p>
+      </div>
+    </div>
+
+    <!-- Act 2 -->
+    <div class="card act">
+      <div class="act-head">
+        <span class="act-n">ACT 02</span>
+        <h3>Web chat page and the question bank</h3>
+        <span class="pill p-ready">Works today</span>
+      </div>
+      <p>Open <code>https://&lt;api-host&gt;/</code> — the buyer-facing page. These questions are verified against the running instance; each one shows a different guarantee.</p>
+      <div class="tscroll">
+        <table>
+          <thead><tr><th>Ask this</th><th>What the client sees</th></tr></thead>
+          <tbody>
+            <tr><td>What is the price of the ultrasound gel?</td><td>A list price with the quotation caveat, cited</td></tr>
+            <tr><td>What do you sell?</td><td>24 products across 7 categories, counted from the catalogue</td></tr>
+            <tr><td>What is the minimum order quantity for the ultrasound gel?</td><td>MOQ answered from the database</td></tr>
+            <tr><td>I have a headache, which medicine should I take?</td><td>A clean clinical refusal — no medical advice, ever</td></tr>
+            <tr><td>Do you sell MRI machines?</td><td>An honest decline, with an offer to get the team to confirm</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout stop">
+        <span class="ctitle">Do not ask this</span>
+        <p><strong>"Can you give me a discount on the X-ray machine?"</strong> — the retrieval matches on "X-ray" and returns an unrelated film-developing-hanger FAQ, presented as a grounded, cited answer. It is the one question in testing that produced a confidently wrong reply, and it is the exact failure the product is built to prevent. Leave it out.</p>
+      </div>
+      <div class="callout warn">
+        <span class="ctitle">Keep prose questions short</span>
+        <p>Commercial questions — price, MOQ, delivery — never touch the language model and answer instantly. Open-ended prose does use it, and the model configured in this deployment is slower than the backend timeout on this machine. If you want to show prose, use a short factual question, and expect a pause.</p>
+      </div>
+    </div>
+
+    <!-- Act 3 -->
+    <div class="card act">
+      <div class="act-head">
+        <span class="act-n">ACT 03</span>
+        <h3>Browser audio</h3>
+        <span class="pill p-ready">Works today</span>
+      </div>
+      <p>Stay on the same page and tap the microphone control. The browser will ask for permission — allow it. Ask the same price question out loud.</p>
+      <p>Speech is transcribed, answered by the same engine that answers text, and spoken back. Interrupt it mid-sentence and it stops — that barge-in behaviour is worth demonstrating deliberately, because it is the thing that makes a voice assistant feel like a conversation rather than a recording.</p>
+      <div class="callout">
+        <span class="ctitle">Two honest notes</span>
+        <p>It runs over a secure connection and needs one: the public <code>https://</code> address works, and so does <code>localhost</code>. A plain <code>http://192.168.x.x</code> address will not — browsers block microphone access on insecure origins.</p>
+        <p>It is not WebRTC. It is a WebSocket carrying audio frames, and it is turn-based: you speak, it answers, and you can interrupt. Calling it full-duplex would be overstating it.</p>
+      </div>
+    </div>
+
+    <!-- Act 4 -->
+    <div class="card act">
+      <div class="act-head">
+        <span class="act-n">ACT 04</span>
+        <h3>WhatsApp</h3>
+        <span class="pill p-setup">Needs setup</span>
+      </div>
+      <p>The assistant is reachable on the Twilio WhatsApp sandbox number <code>+1 415 523 8886</code>. Two things must be true before a client can message it.</p>
+      <ol class="plain">
+        <li><strong>The client's phone has joined the sandbox.</strong> They send the join code as a WhatsApp message to that number. The current code is in the Twilio Console under <em>Messaging → Try it out → Send a WhatsApp message</em>. This is Twilio's requirement, not the product's.</li>
+        <li><strong>The sender webhook points at this instance.</strong> In the Twilio Console, go to <em>Messaging → Senders</em>, open the sender, and set the inbound webhook to the WhatsApp URL the launcher printed, method <strong>POST</strong>. It looks like <code>https://&lt;api-host&gt;/twilio/whatsapp</code>.</li>
+      </ol>
+      <p>Then have the client send a price question from their own phone. The reply arrives in the same thread.</p>
+      <div class="callout warn">
+        <span class="ctitle">Budget for this one</span>
+        <p>The WhatsApp path is built and exercised, but no message has ever been carried over Twilio's real network — the verification so far is in-process. Your first live message is also the first carrier evidence. Test it yourself before you show it, and if it does not reply, check the sender webhook first: it is the cause almost every time.</p>
+      </div>
+      <p class="lede" style="font-size:.88rem">If a reply is composed but not delivered, it is not lost — it appears in the console's Outbound sends panel with the carrier's own error against it.</p>
+    </div>
+
+    <!-- Act 5 -->
+    <div class="card act">
+      <div class="act-head">
+        <span class="act-n">ACT 05</span>
+        <h3>Phone call</h3>
+        <span class="pill p-setup">Needs setup</span>
+      </div>
+      <p>Dial <code>+12792365960</code> and ask the price question when the line opens.</p>
+      <div class="callout warn">
+        <span class="ctitle">The caller speaks first</span>
+        <p>There is no spoken greeting. The line connects to silence and waits for you. Say your question straight away — and tell the client this in advance, because it reads as a fault otherwise.</p>
+      </div>
+      <p>Watch the instance window while the call runs. A healthy call logs the media stream opening, the detected start of speech, the transcript, the answer, and then the stream closing. That sequence is the demo as much as the audio is.</p>
+      <div class="callout stop">
+        <span class="ctitle">The one thing to be careful about</span>
+        <p>No real telephone call has ever been placed through this system. The transport is complete and has been driven end to end by a simulated carrier over the public tunnel, but the first real handset call will also be the first real evidence — and the interruption timing is tuned for a real handset and echo path that nobody has tested against yet. <strong>Make your own call before the client makes theirs.</strong></p>
+      </div>
+      <p class="lede" style="font-size:.88rem">Capacity is two concurrent calls. If a caller hears a busy message instead of the assistant, the line is full or voice has been shed under graphics-card pressure — check the card, not the code.</p>
+    </div>
+
+    <!-- Act 6 -->
+    <div class="card act">
+      <div class="act-head">
+        <span class="act-n">ACT 06</span>
+        <h3>Outbound call — the assistant rings you</h3>
+        <span class="pill p-setup">Needs setup</span>
+      </div>
+      <p>This is the direction the platform <em>chooses</em> rather than receives, and it is the strongest closing moment: your phone rings, and the assistant is the one making the call.</p>
+      <p>It dials one number, named on the command line, and only a number on the approved list can be dialled at all. Adding a number is itself a command:</p>
+      <pre><code>cd D:\project\anitamedicalsystems\platform
+
+.venv\Scripts\python.exe scripts\demo_call.py --list
+.venv\Scripts\python.exe scripts\demo_call.py --add +91XXXXXXXXXX
+.venv\Scripts\python.exe scripts\demo_call.py --to  +91XXXXXXXXXX
+.venv\Scripts\python.exe scripts\demo_call.py --remove +91XXXXXXXXXX</code></pre>
+      <p>Answer it. The assistant greets you by name and company, then answers exactly as it does everywhere else — same engine, same catalogue, same price caveat. Hung up, the call is sitting in the console like any other conversation.</p>
+      <p>A number you add is dialable on the very next call — no restart, because the check reads the list rather than a copy taken at start-up.</p>
+      <div class="callout warn">
+        <span class="ctitle">Expect to add <code>--any-time</code>, and know why</span>
+        <p>Dialling is refused outside <strong>10:00–19:00 India time</strong>, because that is the window the follow-up feature is configured with and the dialler deliberately reuses the same rule rather than keeping a second copy that could disagree.</p>
+        <p>This machine runs on US Pacific time, so its working day sits at night in India — meaning <em>every</em> call you place from here will be refused unless you pass the override:</p>
+        <pre><code>.venv\Scripts\python.exe scripts\demo_call.py --to +91XXXXXXXXXX --any-time</code></pre>
+        <p>That is the correct command for a demo, not a workaround. If you would rather the rule matched your working hours, change <code>outbound.window_start</code> and <code>window_end</code> in <code>config/anita.yaml</code> — but do it deliberately, because those hours are the ones that protect a real buyer from being called at midnight.</p>
+      </div>
+      <div class="callout good">
+        <span class="ctitle">Why this is safe to run in front of a client</span>
+        <p>The list of dialable numbers lives in configuration, and it is checked <strong>twice</strong>: by the command before it dials, and again by the product when the carrier asks for the call's instructions — so even a call placed by something else cannot connect the assistant to a number nobody approved. And the calling-window rule from the follow-up feature still applies: outside the configured hours the command refuses unless you deliberately override it.</p>
+      </div>
+      <div class="callout stop">
+        <span class="ctitle">What this is not</span>
+        <p>It is not the follow-up feature. The lead-driven dialling worker is still held for a legal review of calling real buyers, and nothing here changes that. This places <em>one</em> call, to <em>your</em> number, because you asked it to. Say it that way if the client asks.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================================================================ -->
+  <section>
+    <div class="sec-head">
+      <span class="sec-num">05</span>
+      <h2>What the assistant actually does</h2>
+    </div>
+    <p class="lede">For when the client asks how it works, or why an answer can be trusted.</p>
+
+    <div class="grid2">
+      <div class="card">
+        <h3>Answers from the real catalogue</h3>
+        <p>141 content chunks extracted from the company's own website by an in-repo pipeline — product specifications, trade terms, FAQs, company facts.</p>
+      </div>
+      <div class="card">
+        <h3>Two retrieval legs, fused</h3>
+        <p>Dense vector search and keyword search run together and are combined, with an exact-phrase override when one candidate clearly wins. If the best match falls below the confidence threshold, the assistant declines instead of guessing.</p>
+      </div>
+      <div class="card">
+        <h3>Commercial facts are deterministic</h3>
+        <p>Price, minimum order quantity and delivery time are read from the product database. The model is never on that path. A field that is blank returns "not published" rather than a plausible number.</p>
+      </div>
+      <div class="card">
+        <h3>Every grounded answer is cited</h3>
+        <p>Answers carry their source, and a citation check can block a catalogue update from going live — an uncited answer is treated as a defect, not a cosmetic one.</p>
+      </div>
+      <div class="card">
+        <h3>Guardrails that hold</h3>
+        <p>Clinical questions are refused outright, before retrieval is ever consulted. Off-topic questions are declined. Text generated by the model is re-checked against its own source before it is shown, and rejected if a figure does not appear there.</p>
+      </div>
+      <div class="card">
+        <h3>Leads and escalation</h3>
+        <p>A decline offers a callback and captures the details. Messages are scored for sentiment, and a strongly negative turn raises a handoff for a human — recorded, with the open ones visible on the console.</p>
+      </div>
+      <div class="card">
+        <h3>One conversation, many channels</h3>
+        <p>Chat, WhatsApp and voice resolve to the same buyer identity, so a conversation started on the web continues on the phone.</p>
+      </div>
+      <div class="card">
+        <h3>Quality gates on the record</h3>
+        <p>A frozen evaluation set is pinned by hash and verified at boot; a release gate refuses promotion if the score drops or if answers lose their citations.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================================================================ -->
+  <section>
+    <div class="sec-head">
+      <span class="sec-num">06</span>
+      <h2>What you cannot demo</h2>
+    </div>
+    <p class="lede">Better to know now than to be asked live. Do not promise any of these.</p>
+    <div class="tscroll">
+      <table>
+        <thead><tr><th>Capability</th><th>Status</th><th>Why</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><strong>Follow-up calling</strong> — the assistant ringing buyers by itself</td>
+            <td><span class="pill p-stop">Cannot be demoed</span></td>
+            <td>The dialling queue, its calling-window rules and its attempt limits are built and pass tests, but nothing in the running product starts a worker to drive them, and that is deliberate: proactively calling real buyers is held for a legal review. Act 06 is a different thing — one call, to a number you approved, started by hand. Do not let the demo imply the follow-up feature has arrived.</td>
+          </tr>
+          <tr>
+            <td>Voice, when the graphics card is contended</td>
+            <td><span class="pill p-setup">Check first</span></td>
+            <td>Voice is shed automatically when the shared card runs low, and the only symptom is a busy message. See the callout in Section 01 — check the card before you start, not just when you started.</td>
+          </tr>
+          <tr>
+            <td>A proven real phone call</td>
+            <td><span class="pill p-stop">Unproven</span></td>
+            <td>Inbound transport is complete and verified with a simulated carrier. No real handset call has been placed. Your test call changes this.</td>
+          </tr>
+          <tr>
+            <td>Email notification to a sales rep</td>
+            <td><span class="pill p-setup">Needs setup</span></td>
+            <td>Mail credentials are not configured on this box. Escalations are still recorded and still appear on the console — they simply stay open rather than emailing anyone. Set the mail settings to close this, or present it as the console queue it is.</td>
+          </tr>
+          <tr>
+            <td>WhatsApp over the real carrier</td>
+            <td><span class="pill p-setup">Untested</span></td>
+            <td>Verified in-process only. See Act 04.</td>
+          </tr>
+          <tr>
+            <td>Full-duplex WebRTC audio</td>
+            <td><span class="pill p-stop">Cannot be demoed</span></td>
+            <td>The browser audio is a WebSocket carrying audio frames — turn-based with interruption, not simultaneous. Do not describe it as WebRTC.</td>
+          </tr>
+          <tr>
+            <td>Voice notes and images on WhatsApp</td>
+            <td><span class="pill p-stop">Cannot be demoed</span></td>
+            <td>Voice notes are declined with a prompt to type instead. Images and PDFs are acknowledged and answered from the caption; they are not read into the catalogue.</td>
+          </tr>
+          <tr>
+            <td>An extra messaging channel</td>
+            <td><span class="pill p-stop">Not configured</span></td>
+            <td>The mechanism is built but switched off, and nothing is pointed at it. It is a configuration change to enable, not a development task.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ================================================================ -->
+  <section>
+    <div class="sec-head">
+      <span class="sec-num">07</span>
+      <h2>If something goes wrong</h2>
+    </div>
+    <div class="tscroll">
+      <table>
+        <thead><tr><th>Symptom</th><th>Cause</th><th>Fix</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>A public link does not load</td>
+            <td>Quick tunnels mint a new hostname on every restart, so an old link is dead</td>
+            <td>Re-read <code>logs\urls.txt</code> from the current run</td>
+          </tr>
+          <tr>
+            <td>WhatsApp messages get no reply</td>
+            <td>The sender webhook still points at the previous run's hostname</td>
+            <td>Paste the newly printed WhatsApp URL into the Twilio Console sender settings</td>
+          </tr>
+          <tr>
+            <td>The phone number rings and then dies</td>
+            <td>Twilio's signature check failing — usually a stale hostname</td>
+            <td>Re-run the stack; it updates the voice webhooks and verifies them</td>
+          </tr>
+          <tr>
+            <td>Caller hears a busy message</td>
+            <td>Both call slots taken, or voice was shed under GPU pressure</td>
+            <td>Wait, or free the graphics card; the launcher's pre-flight warns about this</td>
+          </tr>
+          <tr>
+            <td>First call has a long silence</td>
+            <td>Speech models loading — normal, about 7.5 seconds, once per restart</td>
+            <td>Warm it with a test call before the demo</td>
+          </tr>
+          <tr>
+            <td>The microphone button does nothing</td>
+            <td>Insecure origin, or permission denied</td>
+            <td>Use the <code>https://</code> address or <code>localhost</code>, and allow the permission prompt</td>
+          </tr>
+          <tr>
+            <td>An answer takes a long time</td>
+            <td>An open-ended prose question reaching the language model</td>
+            <td>Ask a commercial question instead — price, MOQ, delivery — which never calls the model</td>
+          </tr>
+          <tr>
+            <td>"I don't have that in our catalogue" for something you sell</td>
+            <td>Working as designed — the catalogue does not document it, so the assistant declines rather than guesses</td>
+            <td>Reframe it as the honest-absence behaviour; it is a feature</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer>
+    <span>ANITA MEDICAL SYSTEMS PVT. LTD. — operator runbook, not a client-facing document.</span>
+    <span>Sources: platform/docs/twilio-voice-setup.md · docs/sdlc/work-status.md · live verification 16 Oct 2026</span>
+  </footer>
+
+</div>

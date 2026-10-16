@@ -13,6 +13,13 @@ uvicorn[standard]>=0.30,<1.0
 python-multipart>=0.0.9
 httpx>=0.28,<1.0
 python-dotenv>=1.0,<2.0
+# MOD-10 is the Streamlit surface, and it was missing here while being the
+# surface `tests/e2e` actually drives: a clean install produced a venv where
+# `start_services.ps1` could only warn "Streamlit not installed". The floor is
+# the verified version rather than a guess -- the browser suite selects on
+# Streamlit's own DOM test-ids (`stChatInputTextArea`, `stChatMessage`), which
+# are not a stable API across releases.
+streamlit>=1.65,<2.0
 
 # --- Database (MOD-06, MOD-07) ---
 psycopg2-binary>=2.9,<3.0

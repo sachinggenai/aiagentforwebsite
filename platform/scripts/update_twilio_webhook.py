@@ -119,13 +119,22 @@ def main(tunnel_host: str) -> int:
             print("\nNOT verified — the number's webhooks do not match.")
             return 1
 
-        # WhatsApp is a declared deferral on this product (UC-02), so there is
-        # no sandbox to point anywhere yet. Said out loud rather than left as a
-        # silent omission, because the sibling script does configure one.
+        # WhatsApp inbound is a SENDER setting, not a number setting, so it is
+        # not one of the two updates above -- but it IS a live channel on this
+        # product, so its URL is printed rather than waved away. An earlier
+        # version of this script called WhatsApp "a declared deferral ... nothing
+        # to point at yet", which stopped being true when US-002 landed: the
+        # route is served at server.py, the channel is mapped in
+        # channels.py, and config/anita.yaml records the deferral as removed.
+        whatsapp_number = (
+            settings.env.get("TWILIO_WHATSAPP_NUMBER", "") or phone_number
+        )
         print(
-            "\nWhatsApp: not configured — inbound WhatsApp is deferred (UC-02)\n"
-            "  in config/anita.yaml until the text and lead product is validated\n"
-            "  over web chat. Nothing to point at yet."
+            f"\nWhatsApp inbound (sender {whatsapp_number}):\n"
+            f"  https://{tunnel_host}/twilio/whatsapp   (POST)\n"
+            "  Set it in the Twilio Console: Messaging -> Senders -> your sender\n"
+            "  -> Inbound webhook. A sender setting is not part of the voice\n"
+            "  number, which is why it is reported and not written here."
         )
         return 0
 

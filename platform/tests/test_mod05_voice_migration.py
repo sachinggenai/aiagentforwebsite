@@ -97,6 +97,13 @@ class TestMigrationIntegrity:
             # US-025: emits the turn's trace when the turn resolves, whatever
             # the outcome. The source had tracing hooks but no emit path.
             "def finish_trace(self, *, outcome: str = \"answered\") -> None:",
+            # One locked loader per model, plus a best-effort boot warmup. A
+            # live call's speculative and real STT passes both found the cache
+            # cold and built four Whisper models at once (~26 s of STT before
+            # the caller heard anything). The turn loop itself is unchanged.
+            "def _load_stt_model():",
+            "def _load_tts_engine():",
+            "def warm_voice_models() -> None:",
         }
 
         missing = set(source_defs) - DELIBERATE_GONE - set(copied_defs)

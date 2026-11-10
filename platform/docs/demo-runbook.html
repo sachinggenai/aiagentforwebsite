@@ -539,22 +539,61 @@
         <h3>Web chat page and the question bank</h3>
         <span class="pill p-ready">Works today</span>
       </div>
-      <p>Open <code>https://&lt;api-host&gt;/</code> — the buyer-facing page. These questions are verified against the running instance; each one shows a different guarantee.</p>
+      <p>Open <code>https://&lt;api-host&gt;/</code> — the buyer-facing page. Every question in this bank was re-run against the running instance on 17 October 2026. Use these, not improvised ones: each shows a different guarantee, and each produced a correct, cited answer in testing.</p>
+
+      <p><strong>Commercial facts — deterministic and instant.</strong> These never reach the language model; they read the catalogue row and answer in well under a second.</p>
       <div class="tscroll">
         <table>
           <thead><tr><th>Ask this</th><th>What the client sees</th></tr></thead>
           <tbody>
-            <tr><td>What is the price of the ultrasound gel?</td><td>A list price with the quotation caveat, cited</td></tr>
-            <tr><td>What do you sell?</td><td>24 products across 7 categories, counted from the catalogue</td></tr>
-            <tr><td>What is the minimum order quantity for the ultrasound gel?</td><td>MOQ answered from the database</td></tr>
-            <tr><td>I have a headache, which medicine should I take?</td><td>A clean clinical refusal — no medical advice, ever</td></tr>
-            <tr><td>Do you sell MRI machines?</td><td>An honest decline, with an offer to get the team to confirm</td></tr>
+            <tr><td>What is the price of the ultrasound gel?</td><td>₹60/Piece list price, with the quotation caveat, cited</td></tr>
+            <tr><td>What is the price of the X-Ray Cassette?</td><td>₹2,500/Piece, same caveat and citation</td></tr>
+            <tr><td>What is the price of the Medical Dry Laser Imager?</td><td>₹4,00,000/Piece, same caveat and citation</td></tr>
+            <tr><td>What is the price of the Doctor Protective Apparel?</td><td>₹9,000/Piece, same caveat and citation</td></tr>
+            <tr><td>What is the minimum order quantity for the ultrasound gel?</td><td>10 Pieces, read from the catalogue</td></tr>
+            <tr><td>What is the minimum order quantity for the Microbar Paste?</td><td>10 Pieces</td></tr>
+            <tr><td>What is the MOQ for the High Pressure Syringe &amp; Tubing?</td><td>100 Pieces</td></tr>
+            <tr><td>What is the delivery time for the X-Ray Film Drying Cabinet?</td><td>7 Days</td></tr>
+            <tr><td>What is the delivery time for the Fuji Computed Radiography System?</td><td>7 Days</td></tr>
+            <tr><td>What is the supply ability for the Ultrasound Gel?</td><td>10 Per Day</td></tr>
+            <tr><td>Can I get a sample of the Microbar Powder?</td><td>Samples are available; the buyer pays shipping and taxes</td></tr>
           </tbody>
         </table>
       </div>
+
+      <p><strong>Catalogue and company facts.</strong> Still grounded, still cited; these exercise the catalogue and company records rather than a single commercial field.</p>
+      <div class="tscroll">
+        <table>
+          <thead><tr><th>Ask this</th><th>What the client sees</th></tr></thead>
+          <tbody>
+            <tr><td>What do you sell?</td><td>24 products across 7 categories, counted from the catalogue</td></tr>
+            <tr><td>What are the specifications of the X-Ray Cassette?</td><td>Condition New; not portable; manual power source; 2–3.5 kg — each line from the spec table</td></tr>
+            <tr><td>What is the condition of the X-Ray Cassette?</td><td>"Condition: New", inside the full grounded specification list</td></tr>
+            <tr><td>What are your certifications?</td><td>ISO 9001:2015 and the NSIC-CRISIL ratings</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p><strong>Scope and honesty — the refusals are the feature.</strong> Ask at least one of these; a client trusts the answers more after seeing what the assistant will not answer.</p>
+      <div class="tscroll">
+        <table>
+          <thead><tr><th>Ask this</th><th>What the client sees</th></tr></thead>
+          <tbody>
+            <tr><td>I have a headache, which medicine should I take?</td><td>A clean clinical refusal — no medical advice, ever</td></tr>
+            <tr><td>Do you sell MRI machines?</td><td>An honest decline, with an offer to get the team to confirm</td></tr>
+            <tr><td>What is the price of the Human Body?</td><td>The same honest decline for a product that does not exist — no invented price</td></tr>
+            <tr><td>Do you have branches in Delhi?</td><td>An honest "not in the catalogue" decline; branch data is not published</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout">
+        <span class="ctitle">Optional — show what happens when it is unsure</span>
+        <p><strong>"What are the specifications of the Medical Dry Imager?"</strong> — two products share that name (₹5,50,000 and ₹2,00,000). The assistant does not guess: it lists both and asks which one. Use this if the client asks how ambiguity is handled.</p>
+      </div>
       <div class="callout stop">
         <span class="ctitle">Do not ask this</span>
-        <p><strong>"Can you give me a discount on the X-ray machine?"</strong> — the retrieval matches on "X-ray" and returns an unrelated film-developing-hanger FAQ, presented as a grounded, cited answer. It is the one question in testing that produced a confidently wrong reply, and it is the exact failure the product is built to prevent. Leave it out.</p>
+        <p><strong>"Can you give me a discount on the X-ray machine?"</strong> — it is the slowest path on this box (about 23 seconds in the 17 October run), it reaches the language model, and it still ends in a non-answer. It demonstrates nothing the commercial questions above do not answer instantly. Leave it out.</p>
       </div>
       <div class="callout warn">
         <span class="ctitle">Keep prose questions short</span>

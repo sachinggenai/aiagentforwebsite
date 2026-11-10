@@ -231,6 +231,87 @@ class TestEndOfSpeech:
         assert decode_ulaw_frames(b"\x00" * 160, 16000) == 320
 
 
+class TestVoiceEndpoint:
+    """`feed_audio` decides end-of-speech exactly once per buffered utterance.
+
+    A live call produced 800+ USER_SPEECH_STOPPED events for one utterance,
+    because the stop condition re-fired on every silent frame until the turn
+    reset the buffer. `_begin_turn` hid the consequence; the log and the turn
+    trace did not.
+    """
+
+    @staticmethod
+    def _loud():
+        from anita import voice
+
+        return voice.pcm_to_ulaw(b"\x00\x20" * 320)
+
+    def test_end_of_speech_fires_once_per_utterance(self):
+        from anita import voice
+
+        session = voice.VoiceCallSession()
+        loud = self._loud()
+        for _ in range(voice.MIN_UTTERANCE_FRAMES):
+            session.feed_audio(loud)
+
+        decisions = [session.feed_audio(b"\xff" * 160) for _ in range(100)]
+
+        assert decisions.count(True) == 1
+        trace = session._trace
+        assert trace is not None
+        for _ in range(10):
+            session.feed_audio(b"\xff" * 160)
+        assert session._trace is trace, "a repeated stop replaced the turn trace"
+
+        session.reset_utterance()
+        for _ in range(voice.MIN_UTTERANCE_FRAMES):
+            session.feed_audio(loud)
+        assert [session.feed_audio(b"\xff" * 160)
+                for _ in range(50)].count(True) == 1
+
+
+class TestVoiceModelLoading:
+    def test_concurrent_first_calls_load_one_model(self, monkeypatch):
+        """A speculative pass and the turn's pass can both find the cache cold;
+        the lock, not luck, must decide who builds the model."""
+        import sys
+        import threading
+        import time
+        import types
+
+        import anita.voice_platform as voice_platform
+        from anita import voice
+
+        created = []
+
+        class FakeWhisperModel:
+            def __init__(self, *args, **kwargs):
+                created.append(1)
+                time.sleep(0.05)
+
+        fake = types.ModuleType("faster_whisper")
+        fake.WhisperModel = FakeWhisperModel
+        monkeypatch.setitem(sys.modules, "faster_whisper", fake)
+        monkeypatch.setattr(voice_platform, "get_whisper_device_config",
+                            lambda: ("cpu", "float32"))
+        monkeypatch.setattr(voice, "_stt_model", None)
+
+        loaded = []
+        threads = [
+            threading.Thread(target=lambda: loaded.append(voice._get_stt_model()))
+            for _ in range(8)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert len(created) == 1, (
+            f"{len(created)} Whisper models built by concurrent first calls"
+        )
+        assert len(loaded) == 8 and all(model is loaded[0] for model in loaded)
+
+
 # ---------------------------------------------------------------------------
 # Tracing — the deletion property
 # ---------------------------------------------------------------------------

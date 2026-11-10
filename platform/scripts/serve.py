@@ -88,6 +88,23 @@ def main(argv: list[str] | None = None) -> int:
         print("note: ANITA_ADMIN_TOKEN is unset — the admin console will refuse "
               "every request (it fails closed).", file=sys.stderr)
 
+    # Whisper and Kokoro are ~10 s of cold load combined, and a live call pays
+    # for both inside its first turn if nothing has loaded them yet. Warm them
+    # in the background so the first demo call does not. Best-effort: the
+    # loader logs a failure and the call path loads the model itself, under
+    # the same lock, rather than the API refusing to serve.
+    if getattr(built.router, "voice", None) is not None:
+        try:
+            import threading
+
+            from anita.voice import warm_voice_models
+
+            threading.Thread(
+                target=warm_voice_models, name="voice-warmup", daemon=True
+            ).start()
+        except Exception as exc:  # noqa: BLE001 - a warmup must not stop serving
+            print(f"note: voice warmup skipped ({exc})", file=sys.stderr)
+
     from anita.server import serve
 
     serve(built.router, host=args.host, port=port)

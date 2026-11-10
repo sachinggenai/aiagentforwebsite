@@ -325,7 +325,7 @@ class TestTheRoutes:
             return lambda **kwargs: None
 
     @classmethod
-    def _client(cls, *, dialer=None):
+    def _client(cls, *, dialer=None, base_url="http://127.0.0.1:8100"):
         from fastapi.testclient import TestClient
 
         from anita.server import create_app
@@ -335,15 +335,100 @@ class TestTheRoutes:
         app = create_app(build_router(
             chat=stub, mic=stub, admin=stub, admin_token="secret", dialer=dialer,
         ))
-        return TestClient(app)
+        return TestClient(app, base_url=base_url)
 
-    def test_the_dialer_routes_require_the_admin_token(self):
-        client = self._client()
+    # A request through the Cloudflare tunnel carries CF-Ray; a direct visit to
+    # the loopback-bound API carries neither. But "no CF headers" alone is not
+    # proof of a local operator, so the shortcut also requires a loopback Host
+    # and, for a POST, a matching Origin (what the page's own fetch sends).
+    TUNNELED = {"CF-Ray": "8f0bom06", "CF-Connecting-IP": "203.0.113.9"}
+    LOCAL_ORIGIN = {"Origin": "http://127.0.0.1:8100"}
+
+    def test_a_tunneled_dialer_still_requires_the_admin_token(self, tmp_path):
+        client = self._client(dialer=_dialer(tmp_path)[0])
+
+        assert client.get("/api/admin/dialable",
+                          headers=self.TUNNELED).status_code == 401
+        assert client.post("/api/admin/call", json={"number": CALLEE},
+                           headers=self.TUNNELED).status_code == 401
+        assert client.post("/api/admin/dialable",
+                           json={"number": CALLEE, "action": "add"},
+                           headers=self.TUNNELED).status_code == 401
+
+    def test_a_public_host_is_not_the_local_operator(self, tmp_path):
+        """No CF header is not evidence of locality: a DNS-rebinding request
+        reaches the port with its own Host and must be refused."""
+        client = self._client(
+            dialer=_dialer(tmp_path)[0],
+            base_url="http://rebind.example:8100",
+        )
 
         assert client.get("/api/admin/dialable").status_code == 401
-        assert client.post("/api/admin/call", json={"number": CALLEE}).status_code == 401
-        assert client.post("/api/admin/dialable",
-                           json={"number": CALLEE, "action": "add"}).status_code == 401
+        assert client.post("/api/admin/call", json={"number": CALLEE},
+                           headers={"Origin": "http://rebind.example:8100"}
+                           ).status_code == 401
+
+    def test_a_local_dialer_visit_is_the_operator(self, tmp_path):
+        client = self._client(dialer=_dialer(tmp_path)[0])
+
+        response = client.get("/api/admin/dialable")
+
+        assert response.status_code == 200
+        assert response.json()["numbers"] == [CALLEE]
+
+    def test_a_local_call_from_the_page_needs_no_token(self, tmp_path):
+        """The page's own fetch sends Origin; the number is the only argument."""
+        dialer, sent, _ = _dialer(tmp_path)
+        client = self._client(dialer=dialer)
+
+        response = client.post("/api/admin/call", json={"number": CALLEE},
+                               headers=self.LOCAL_ORIGIN)
+
+        assert response.status_code == 200
+        assert response.json()["sid"] == "CA-fake-0001"
+        assert len(sent) == 1
+
+    def test_a_foreign_origin_post_is_refused(self, tmp_path):
+        """Any page the operator has open can POST to 127.0.0.1 with a simple
+        content type and no preflight. Its Origin must refuse it."""
+        client = self._client(dialer=_dialer(tmp_path)[0])
+
+        response = client.post(
+            "/api/admin/call",
+            json={"number": CALLEE},
+            headers={"Origin": "https://evil.example"},
+        )
+
+        assert response.status_code == 401
+
+    def test_a_post_without_an_origin_is_refused(self, tmp_path):
+        client = self._client(dialer=_dialer(tmp_path)[0])
+
+        assert client.post("/api/admin/call",
+                           json={"number": CALLEE}).status_code == 401
+
+    def test_a_tunneled_post_with_a_loopback_origin_is_still_refused(self, tmp_path):
+        client = self._client(dialer=_dialer(tmp_path)[0])
+
+        headers = {**self.TUNNELED, **self.LOCAL_ORIGIN}
+        assert client.post("/api/admin/call", json={"number": CALLEE},
+                           headers=headers).status_code == 401
+
+    def test_a_supplied_token_is_still_checked_locally(self, tmp_path):
+        """The shortcut fills in a *missing* token; it never overrides one."""
+        client = self._client(dialer=_dialer(tmp_path)[0])
+
+        response = client.get("/api/admin/dialable",
+                              headers={"Authorization": "Bearer wrong"})
+
+        assert response.status_code == 401
+
+    def test_the_local_shortcut_is_only_the_dialer(self):
+        """Every other admin surface stays token-only, even on the box."""
+        client = self._client()
+
+        assert client.get("/api/admin/metrics").status_code == 401
+        assert client.get("/api/admin/channels").status_code == 401
 
     def test_an_authenticated_read_reaches_the_handler(self, tmp_path):
         client = self._client(dialer=_dialer(tmp_path)[0])

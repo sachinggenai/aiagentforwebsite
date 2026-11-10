@@ -150,13 +150,55 @@ function setInstance(text, cls) {
   el.className = "pill" + (cls ? " " + cls : "");
 }
 
+function showAuthControls() {
+  $("token").hidden = false;
+  $("connect").hidden = false;
+}
+
+function hideAuthControls() {
+  // Local: the server already knows this is the operator. The controls stay
+  // in the page for the tunnel case, where the token is still required.
+  $("token").hidden = true;
+  $("connect").hidden = true;
+}
+
+function isLocalPage() {
+  // The server treats a loopback Host as the operator; mirror that here so the
+  // public page does not fire a guaranteed-401 probe on every load.
+  const host = location.hostname;
+  return host === "127.0.0.1" || host === "localhost" || host === "::1"
+    || host === "[::1]";
+}
+
+function requireToken() {
+  if (token) { return true; }
+  setInstance("Admin token required — paste it above and press Connect", "err");
+  showAuthControls();
+  $("token").focus();
+  return false;
+}
+
 async function api(route, options) {
-  const res = await fetch(API + route, Object.assign({
-    headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token }
-  }, options || {}));
+  // No token, no header: a direct local visit is authenticated by the server.
+  // Through the tunnel the server refuses it, and the page asks for the token
+  // rather than surfacing the raw 401 text.
+  const headers = { "Content-Type": "application/json" };
+  if (token) { headers["Authorization"] = "Bearer " + token; }
+  const res = await fetch(API + route, Object.assign({}, options || {}, { headers }));
   let data = null;
   try { data = await res.json(); } catch (e) { data = null; }
   if (!res.ok) {
+    if (res.status === 401) {
+      // Missing, stale, or never entered. Never keep retrying a credential
+      // the server has just refused: drop it and ask again.
+      const supplied = !!token;
+      token = "";
+      sessionStorage.removeItem("anita-admin");
+      showAuthControls();
+      throw new Error(supplied
+        ? "Admin token rejected — paste the current token and press Connect"
+        : "Admin token required — paste it above and press Connect");
+    }
     throw new Error((data && (data.error || data.reason)) || ("HTTP " + res.status));
   }
   return data;
@@ -247,6 +289,7 @@ async function load() {
 async function addNumber() {
   const value = $("add-number").value.trim();
   if (!value) { $("add-number").focus(); return; }
+  if (!requireToken()) { return; }
   try {
     const data = await api("/api/admin/dialable", {
       method: "POST",
@@ -281,6 +324,7 @@ function showRefusal(message) {
 async function placeCall() {
   const value = $("call-number").value.trim();
   if (!value) { $("call-number").focus(); return; }
+  if (!requireToken()) { return; }
   $("call").disabled = true;
   $("result").textContent = "";
   try {
@@ -318,9 +362,45 @@ async function connect() {
   if (!token) { $("token").focus(); return; }
   try {
     await load();
+    hideAuthControls();
   } catch (err) {
     setInstance(err.message, "err");
+    showAuthControls();
   }
+}
+
+async function init() {
+  // Local-first. A direct visit is the operator and needs no token. The public
+  // page asks for the token without first making a request certain to 401.
+  const stored = token;
+  token = "";
+  let firstError = null;
+  if (isLocalPage()) {
+    try {
+      await load();
+      hideAuthControls();
+      return;
+    } catch (err) {
+      firstError = err;
+    }
+  }
+  token = stored;
+  if (token) {
+    try {
+      await load();
+      hideAuthControls();
+      return;
+    } catch (err) {
+      setInstance(err.message, "err");
+      showAuthControls();
+      $("token").focus();
+      return;
+    }
+  }
+  setInstance(firstError ? firstError.message
+    : "Admin token required — paste it above and press Connect", "err");
+  showAuthControls();
+  $("token").focus();
 }
 
 $("connect").addEventListener("click", connect);
@@ -331,7 +411,7 @@ $("add-number").addEventListener("keydown", (e) => e.key === "Enter" && addNumbe
 $("call-number").addEventListener("keydown", (e) => e.key === "Enter" && placeCall());
 $("token").addEventListener("keydown", (e) => e.key === "Enter" && connect());
 
-if (token) { $("token").value = token; connect(); }
+init();
 </script>
 </body>
 </html>

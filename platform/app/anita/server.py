@@ -27,6 +27,7 @@ import json
 import logging
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi import Response as RawResponse
@@ -478,6 +479,61 @@ def _page(name: str) -> Any:
     return FileResponse(path, media_type="text/html; charset=utf-8")
 
 
+# The dialer, when it is opened on the box itself.
+#
+# The dialer is the one surface an operator opens on this machine before a
+# demo, and asking for the admin token there made the page a two-step form for
+# no security gain. The API binds 127.0.0.1, so a direct local visit can be
+# recognised. The check is deliberately **fail-closed** rather than "no
+# Cloudflare headers therefore local": any page the operator has open can POST
+# to 127.0.0.1 with a simple content type and no preflight, and a DNS-rebinding
+# page can make the port look same-origin. So the request must name a loopback
+# host, must not carry a Cloudflare ingress header, and a state-changing
+# request must carry an `Origin` matching that host. A local process that
+# prefers not to send `Origin` can still use the admin token.
+#
+# Deliberately scoped to the three dialer routes. Every other admin surface
+# stays token-only: this is a local convenience, not a second admin door.
+LOCAL_DIALER_ROUTES = frozenset(
+    {Route.ADMIN_DIALABLE, Route.ADMIN_DIALABLE_EDIT, Route.ADMIN_CALL}
+)
+_TUNNEL_HEADERS = ("cf-ray", "cf-connecting-ip")
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _through_tunnel(request: Request) -> bool:
+    """Whether Cloudflare, rather than a local process, made this request."""
+    return any(request.headers.get(name) for name in _TUNNEL_HEADERS)
+
+
+def _local_operator_request(request: Request) -> bool:
+    """Whether the local dialer page itself could have made this request.
+
+    The Origin check matters only for methods that can change state. Browsers
+    send `Origin` on a same-origin POST, so the page's own fetch passes; a
+    cross-site page sending one fails; a non-browser caller that omits it is
+    asked for the token instead of being trusted.
+    """
+    if _through_tunnel(request):
+        return False
+
+    host = (request.headers.get("host") or "").strip().lower()
+    if not host:
+        return False
+    target = urlsplit("//" + host)
+    if target.hostname not in _LOOPBACK_HOSTS:
+        return False
+
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        origin = (request.headers.get("origin") or "").strip().lower()
+        if not origin:
+            return False
+        source = urlsplit(origin)
+        if source.scheme not in ("http", "https") or source.netloc != target.netloc:
+            return False
+    return True
+
+
 def _make_handler(router: Router, route: Route) -> Callable[[Request], Any]:
     """One handler closure per route, dispatching through the surface router.
 
@@ -487,8 +543,15 @@ def _make_handler(router: Router, route: Route) -> Callable[[Request], Any]:
 
     async def handler(request: Request) -> Any:
         arguments = await _arguments(request, route)
+        token = _bearer(request)
+        # A local visit to the dialer is the operator, and is not asked for a
+        # token. A tunneled request never gets the configured token injected:
+        # it must present its own. A token the caller *did* send is always
+        # checked as supplied, so a wrong one is still a 401 here.
+        if not token and route in LOCAL_DIALER_ROUTES and _local_operator_request(request):
+            token = router.admin_token
         try:
-            response = router.dispatch(route, token=_bearer(request), **arguments)
+            response = router.dispatch(route, token=token, **arguments)
         except Exception:  # noqa: BLE001 - the adapter must not 500 silently
             logger.exception("unhandled error dispatching %s", route.value)
             return JSONResponse(status_code=500, content={"error": "internal error"})

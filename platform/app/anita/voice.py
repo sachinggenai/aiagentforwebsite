@@ -31,6 +31,7 @@ import io as _io
 import logging
 import re
 import os
+import threading
 import time as _time
 from pathlib import Path
 
@@ -54,6 +55,12 @@ voice_events = logging.getLogger("anita.voice.events")
 
 _stt_model = None
 _tts_engine = None
+#: One loader at a time. A speculative pass and the turn's own pass can both
+#: find the cache cold; without this lock each built its own WhisperModel on
+#: the GPU. Four loads were observed at once on a live call, turning a ~4 s
+#: cold start into ~26 s of STT before the caller heard anything.
+_stt_lock = threading.Lock()
+_tts_lock = threading.Lock()
 _STT_MODEL_SIZE = settings.WHISPER_MODEL  # small.en or medium.en
 
 
@@ -62,6 +69,16 @@ def _get_stt_model():
     global _stt_model
     if _stt_model is not None:
         return _stt_model
+    with _stt_lock:
+        if _stt_model is not None:
+            return _stt_model
+        _stt_model = _load_stt_model()
+        return _stt_model
+
+
+def _load_stt_model():
+    """Build the Whisper model. Caller holds `_stt_lock`."""
+    global _stt_model
 
     from faster_whisper import WhisperModel
 
@@ -127,6 +144,16 @@ def _get_tts_engine():
     global _tts_engine
     if _tts_engine is not None:
         return _tts_engine
+    with _tts_lock:
+        if _tts_engine is not None:
+            return _tts_engine
+        _tts_engine = _load_tts_engine()
+        return _tts_engine
+
+
+def _load_tts_engine():
+    """Build the Kokoro engine. Caller holds `_tts_lock`."""
+    global _tts_engine
 
     # Ask for CUDA. Whether we GET it is checked below, from the session.
     import onnxruntime as ort
@@ -175,6 +202,23 @@ def _get_tts_engine():
             requested or "(nothing)", ",".join(active),
         )
     return _tts_engine
+
+
+def warm_voice_models() -> None:
+    """Load STT and TTS into this process before the first call.
+
+    The first live call otherwise paid for both cold loads inside its first
+    turn. Best-effort: a failure here is logged and the call path still loads
+    the model itself, under the same lock, rather than the API refusing to
+    serve.
+    """
+    logger.info("voice warmup: loading STT and TTS models")
+    for name, loader in (("STT", _get_stt_model), ("TTS", _get_tts_engine)):
+        try:
+            loader()
+        except Exception as exc:  # noqa: BLE001 - warmup must never block serving
+            logger.warning("voice warmup: %s failed (%s)", name, exc)
+    logger.info("voice warmup: finished")
 
 
 #: Voice and speaking rate for the LIVE call path.
@@ -713,6 +757,12 @@ class VoiceCallSession:
         self._audio_buffer: list[bytes] = []      # raw µ-law chunks
         self._silence_count = 0
         self._total_frames = 0
+        #: One end-of-speech decision per buffered utterance. `feed_audio`
+        #: returns True on the transition only; without this it returned True
+        #: on every silent frame until `process_utterance` reset the buffer,
+        #: producing 800+ USER_SPEECH_STOPPED events (and a new turn trace)
+        #: for a single utterance on the live call.
+        self._endpointed = False
 
         # US-014: the turn state, and the reference signal the echo gate
         # measures the caller against. `_playout` is the outbound audio the
@@ -762,6 +812,7 @@ class VoiceCallSession:
         self._audio_buffer.clear()
         self._silence_count = 0
         self._total_frames = 0
+        self._endpointed = False
         # Invalidate any in-flight speculation. The epoch, not the snapshot
         # alone, is what makes this safe: the harness loops a four-fixture set,
         # so two turns genuinely can carry byte-identical audio, and a stale
@@ -1184,11 +1235,14 @@ class VoiceCallSession:
             self._silence_count += 1
             self._maybe_start_speculative_stt()
 
-        # Trigger on trailing silence OR max utterance length
-        if self._audio_buffer and (
+        # Trigger on trailing silence OR max utterance length. The flag makes
+        # this the transition only: while the turn runs, silent frames keep
+        # arriving and used to re-fire the event (and overwrite the trace).
+        if (not self._endpointed and self._audio_buffer and (
             self._silence_count >= self._silence_threshold
             or self._total_frames >= self._max_utterance
-        ):
+        )):
+            self._endpointed = True
             self.log_event("USER_SPEECH_STOPPED", frames=self._total_frames)
             # US-001: open a trace for this turn. vad_end is the zero point for
             # processing_ms. The 600 ms the caller waited before this instant is

@@ -394,7 +394,7 @@
         <li><span><strong>Start the stack</strong> (Section 02). The launcher mints a new public hostname every run, so do this the same day, not the day before.</span></li>
         <li><span><strong>Re-point the WhatsApp sender webhook</strong> in the Twilio Console. This is the one step the launcher cannot do for you — see Act 04. It goes stale on every restart.</span></li>
         <li><span><strong>Get the client onto the WhatsApp sandbox</strong> first. Their phone must send the join code before they can message the assistant at all. Do this before the demo, not during it.</span></li>
-        <li><span><strong>Warm the voice path with one test call.</strong> The first call after a restart takes about 7.5 seconds to produce audio while the speech models load. Warm, it is immediate. Never let the client's call be the first one.</span></li>
+        <li><span><strong>Warm the voice path with one test call.</strong> The API now preloads the speech models in the background at start (about 7 seconds; look for <code>voice warmup: finished</code>). Make one test call anyway, before the client is in the room — never let the client's call be the first one.</span></li>
         <li><span><strong>Confirm voice is actually available — at demo time, not just at boot.</strong> The launcher checks the graphics card once. A monitor re-samples it every five seconds and will shed voice on its own if free memory drops. When it does, every call is refused as busy while chat keeps working, so the stack looks healthy and only the voice half is dead.</span></li>
         <li><span><strong>Decide your prose questions.</strong> See the caution in Act 02 — open-ended prose is the slowest path on this box.</span></li>
         <li><span><strong>Open the console in a second tab</strong> and keep it ready. It is what turns "the assistant answered" into "and here is the record of it".</span></li>
@@ -486,7 +486,7 @@
           </tr>
           <tr>
             <td>Phone call</td>
-            <td><code>+12792365960</code></td>
+            <td><code>+16067334470</code></td>
             <td><span class="pill p-setup">Needs setup</span></td>
             <td>The full voice pipeline over a real carrier.</td>
           </tr>
@@ -644,7 +644,7 @@
         <h3>Phone call</h3>
         <span class="pill p-setup">Needs setup</span>
       </div>
-      <p>Dial <code>+12792365960</code> and ask the price question when the line opens.</p>
+      <p>Dial <code>+16067334470</code> and ask the price question when the line opens.</p>
       <div class="callout warn">
         <span class="ctitle">The caller speaks first</span>
         <p>There is no spoken greeting. The line connects to silence and waits for you. Say your question straight away — and tell the client this in advance, because it reads as a fault otherwise.</p>
@@ -652,7 +652,7 @@
       <p>Watch the instance window while the call runs. A healthy call logs the media stream opening, the detected start of speech, the transcript, the answer, and then the stream closing. That sequence is the demo as much as the audio is.</p>
       <div class="callout stop">
         <span class="ctitle">The one thing to be careful about</span>
-        <p>No real telephone call has ever been placed through this system. The transport is complete and has been driven end to end by a simulated carrier over the public tunnel, but the first real handset call will also be the first real evidence — and the interruption timing is tuned for a real handset and echo path that nobody has tested against yet. <strong>Make your own call before the client makes theirs.</strong></p>
+        <p>Real outbound calls have now completed end to end through this instance, including transcription and spoken answers. The inbound direction has been verified at the webhook and TwiML level, but the first real handset call to the number is still the first carrier evidence — and the interruption timing is tuned for a real handset and echo path. <strong>Make your own call before the client makes theirs.</strong></p>
       </div>
       <p class="lede" style="font-size:.88rem">Capacity is two concurrent calls. If a caller hears a busy message instead of the assistant, the line is full or voice has been shed under graphics-card pressure — check the card, not the code.</p>
     </div>
@@ -680,7 +680,7 @@
       <div class="callout warn">
         <span class="ctitle">Expect to add <code>--any-time</code>, and know why</span>
         <p>Dialling is refused outside <strong>10:00–19:00 India time</strong>, because that is the window the follow-up feature is configured with and the dialler deliberately reuses the same rule rather than keeping a second copy that could disagree.</p>
-        <p>This machine runs on US Pacific time, so its working day sits at night in India — meaning <em>every</em> call you place from here will be refused unless you pass the override:</p>
+        <p>This machine is on India Standard Time (UTC+05:30), the same timezone as the window. Calls between 10:00 and 19:00 IST need no override; a demo before 10:00 (or after 19:00) must tick <strong>Allow outside the calling window</strong> or pass <code>--any-time</code>:</p>
         <pre><code>.venv\Scripts\python.exe scripts\demo_call.py --to +91XXXXXXXXXX --any-time</code></pre>
         <p>That is the correct command for a demo, not a workaround. If you would rather the rule matched your working hours, change <code>outbound.window_start</code> and <code>window_end</code> in <code>config/anita.yaml</code> — but do it deliberately, because those hours are the ones that protect a real buyer from being called at midnight.</p>
       </div>
@@ -832,7 +832,7 @@
           </tr>
           <tr>
             <td>First call has a long silence</td>
-            <td>Speech models loading — normal, about 7.5 seconds, once per restart</td>
+            <td>Speech models loading — the API warms them at start; check <code>voice warmup: finished</code></td>
             <td>Warm it with a test call before the demo</td>
           </tr>
           <tr>

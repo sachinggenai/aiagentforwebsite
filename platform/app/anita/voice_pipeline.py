@@ -52,6 +52,10 @@ def install(orchestrator, engine) -> None:
         # dropped on the floor.
         channels = {
             "voice_inbound": Channel.VOICE_INBOUND,
+            # A call the dialler placed used to fall through to VOICE_INBOUND
+            # here, so the console filed every outbound call as one it received
+            # even though the media stream had named itself correctly.
+            "voice_outbound": Channel.VOICE_OUTBOUND,
             "browser_mic": Channel.BROWSER_MIC,
         }
         envelope = InboundEnvelope(

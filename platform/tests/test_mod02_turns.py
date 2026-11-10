@@ -746,3 +746,48 @@ class TestJanitor:
 
         assert result["expired"] == 0
         assert store.turn_count(conversation.conversation_id) > 0
+
+
+class TestVoiceOutboundChannel:
+    def test_an_outbound_call_is_recorded_as_outbound(self):
+        """The dialler's call used to fall through the voice pipeline's channel
+        map to VOICE_INBOUND, so the console filed it as one it received even
+        though the media stream had named it correctly."""
+        from types import SimpleNamespace
+
+        from anita import voice_pipeline
+        from anita.voice_pipeline import install, run_rag_query_sync
+
+        seen = []
+
+        class Registry:
+            def resolve(self, envelope):
+                seen.append(envelope)
+                return SimpleNamespace(conversation_id="c1")
+
+        class FakeOrchestrator:
+            registry = Registry()
+
+            def submit_turn(self, conversation_id, work):
+                return work()
+
+            def begin_turn(self, envelope):
+                return object(), SimpleNamespace(intent="commercial")
+
+            def complete_turn(self, record, text, failed=False):
+                return None
+
+        class FakeEngine:
+            def answer(self, intent, question, record):
+                return SimpleNamespace(text="ok", unavailable=False)
+
+        original_answer, original_finish = voice_pipeline._ANSWER, voice_pipeline._FINISH
+        try:
+            install(FakeOrchestrator(), FakeEngine())
+            run_rag_query_sync("", "voice", "hello", session_key="s1",
+                               channel_kind="voice_outbound")
+        finally:
+            voice_pipeline._ANSWER = original_answer
+            voice_pipeline._FINISH = original_finish
+
+        assert seen and seen[0].channel is Channel.VOICE_OUTBOUND

@@ -3,7 +3,7 @@
 > **Audience:** operator. **Prerequisite:** US-001's transport is built (webhook, media-stream relay, channel tables).
 > **Outcome:** dialling the ANITA number reaches this instance and is answered.
 
-The number is **+12792365960** (`TWILIO_PHONE_NUMBER`). It must match exactly — attribution
+The number is **+16067334470** (`TWILIO_PHONE_NUMBER`). It must match exactly — attribution
 compares the number Twilio says was called against the endpoint registered at boot, and a mismatch
 is refused with a 403 even when the signature is valid.
 
@@ -83,7 +83,7 @@ TUNNEL_HOST=random-words-1234.trycloudflare.com
 
 # Optional: the number spoken in the busy message when capacity is full.
 # Leave blank and only the busy message is played.
-ANITA_CALLBACK_NUMBER=+12792365960
+ANITA_CALLBACK_NUMBER=+16067334470
 ```
 
 Then restart the instance:
@@ -143,7 +143,7 @@ protection working, not a fault.
 
 In the Twilio Console:
 
-**Phone Numbers → Manage → Active numbers → +12792365960**
+**Phone Numbers → Manage → Active numbers → +16067334470**
 
 Under **Voice Configuration**:
 
@@ -162,7 +162,7 @@ disagree.
 
 ## Step 7 — Place the call
 
-Dial **+12792365960** and ask something answerable from the catalogue — *"how much is the
+Dial **+16067334470** and ask something answerable from the catalogue — *"how much is the
 ultrasound gel"*.
 
 Watch the instance terminal. A healthy call shows, in order: `media stream: started`, then
@@ -237,7 +237,7 @@ than asserting a fixed one. A GPU host admits 2.
 
 ### Half 2 — the calls only a handset can make
 
-Dial **+12792365960** and work through these, watching the instance terminal and
+Dial **+16067334470** and work through these, watching the instance terminal and
 `logs/anita/perf_turns.jsonl`:
 
 | # | Do this | Expect |

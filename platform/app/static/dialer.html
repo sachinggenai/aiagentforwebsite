@@ -141,6 +141,10 @@ const $ = (id) => document.getElementById(id);
 // sessionStorage, not localStorage: this page is opened on a shared demo
 // machine, and an admin token should not outlive the tab.
 let token = sessionStorage.getItem("anita-admin") || "";
+// A local visit is authenticated by the server without a token. Actions must
+// accept that state; checking `token` alone blocked Call on the very page the
+// loopback shortcut exists for.
+let authed = false;
 let numbers = [];
 let history = [];
 
@@ -171,7 +175,7 @@ function isLocalPage() {
 }
 
 function requireToken() {
-  if (token) { return true; }
+  if (authed || token) { return true; }
   setInstance("Admin token required — paste it above and press Connect", "err");
   showAuthControls();
   $("token").focus();
@@ -192,6 +196,7 @@ async function api(route, options) {
       // Missing, stale, or never entered. Never keep retrying a credential
       // the server has just refused: drop it and ask again.
       const supplied = !!token;
+      authed = false;
       token = "";
       sessionStorage.removeItem("anita-admin");
       showAuthControls();
@@ -201,6 +206,9 @@ async function api(route, options) {
     }
     throw new Error((data && (data.error || data.reason)) || ("HTTP " + res.status));
   }
+  // Any successful call proves this tab is authenticated, whether that came
+  // from the token or from the loopback visit.
+  authed = true;
   return data;
 }
 

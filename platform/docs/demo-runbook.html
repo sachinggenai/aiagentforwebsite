@@ -666,6 +666,10 @@
       </div>
       <p>This is the direction the platform <em>chooses</em> rather than receives, and it is the strongest closing moment: your phone rings, and the assistant is the one making the call.</p>
       <p>Open <code>https://&lt;api-host&gt;/dialer</code> and paste the admin token. The page lists what may be dialled, adds and removes numbers, and places the call. Type a number, press Call, and answer your phone.</p>
+      <div class="callout warn">
+        <span class="ctitle">Ask a verified question</span>
+        <p>Use the bank in Act 02 — <strong>"What is the price of the ultrasound gel?"</strong> or <strong>"What do you sell?"</strong>. Improvised phrasing such as "provide me the list of the product" is classified as an unknown product and honestly declined; the text page does exactly the same, so it is not a voice fault.</p>
+      </div>
       <p>The approved numbers, the token, and the Call button are all on one screen — which is the point of it being a page rather than a dashboard panel.</p>
       <p>There is a terminal equivalent, for a box you are already sitting at:</p>
       <pre><code>cd D:\project\anitamedicalsystems\platform
@@ -675,7 +679,7 @@
 .venv\Scripts\python.exe scripts\demo_call.py --to  +91XXXXXXXXXX
 .venv\Scripts\python.exe scripts\demo_call.py --remove +91XXXXXXXXXX</code></pre>
       <p>Both are the same code underneath, so a rule cannot hold on one and not the other.</p>
-      <p>Answer it. The assistant greets you by name and company, then answers exactly as it does everywhere else — same engine, same catalogue, same price caveat. Hung up, the call is sitting in the console like any other conversation.</p>
+      <p>Answer it. The assistant greets you as the assistant from the company, then answers exactly as it does everywhere else — same engine, same catalogue, same price caveat. Hung up, the call is sitting in the console as a <code>voice_outbound</code> conversation.</p>
       <p>A number you add is dialable on the very next call — no restart, because the check reads the list rather than a copy taken at start-up.</p>
       <div class="callout warn">
         <span class="ctitle">Expect to add <code>--any-time</code>, and know why</span>
